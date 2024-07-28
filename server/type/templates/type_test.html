@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+
+{% block content %}
+    <div>
+        <div style="font-size: x-large;">
+            <div style="display: inline-block;">{{ japanese }}</div>
+        </div>
+        <!-- Render the form using Django template syntax -->
+        <form action="{% url 'update_typed_test' %}" method="POST">
+            {% csrf_token %}
+            <!-- extend the length of the box -->
+            <input type="text" name="typed_text" placeholder="Type here" autofocus style="width: 30%;" />
+            <button type="submit">Submit</button>
+        </form>
+    </div>
+{% endblock %}

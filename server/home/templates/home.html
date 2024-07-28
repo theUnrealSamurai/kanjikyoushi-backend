@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+
+{% block content %}
+    {% if request.user.is_authenticated %}
+        <h1>Hello fuckin {{ request.user.username }}</h1>
+        <a href="{% url 'logout' %}">Logout</a>
+    {% else %}
+        <a href="{% url 'login' %}">Login</a>
+        <a href="{% url 'signup' %}">Signup</a>
+    {% endif %}
+    <h1>Welcome you fuckin loser, This is type kanji 2024. work your ass off and learn some shit</h1>
+{% endblock %}
