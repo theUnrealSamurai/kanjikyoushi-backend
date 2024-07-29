@@ -1,4 +1,4 @@
-.venv/
+.server/
 server/blog/__pycache__/
 server/blog/migrations/__pycache__/
 server/home/__pycache__/
