@@ -1,14 +1,12 @@
 .server/
-server/blog/__pycache__/
-server/blog/migrations/__pycache__/
+.vscode/
+.venv/
 server/home/__pycache__/
 server/home/migrations/__pycache__/
 server/server/__pycache__/__init__.cpython-312.pyc
 server/server/__pycache__/settings.cpython-312.pyc
 server/server/__pycache__/urls.cpython-312.pyc
 server/server/__pycache__/wsgi.cpython-312.pyc
-server/stats/__pycache__/
-server/stats/migrations/__pycache__/
 server/type/__pycache__/
 server/type/migrations/__pycache__/
 server/type/utils/__pycache__/
