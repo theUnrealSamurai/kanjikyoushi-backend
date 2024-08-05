@@ -15,7 +15,10 @@ class CoreDataProcessing(models.Model):
 
     test_threshold = models.SmallIntegerField(default=5)
 
+    all_kanjis = models.CharField(max_length=50000, blank=True)
+    all_kanjis = ''.join(line.strip() for line in open('assets/kanjiJLPT.txt', 'r', encoding='utf-8').readlines())
     
+
     def __str__(self):
         return self.user.username
     
@@ -25,7 +28,13 @@ class CoreDataProcessing(models.Model):
             takes a list of kanjis from the front end and updates it in the learned kanji. 
             plus processess for unlearned kanji and updates the learning kanji.
         """
+
         self.learned_kanji = kanji_list
+        for i in kanji_list:
+            self.all_kanjis = self.all_kanjis.replace(i, "")
+        self.save()
+        self.learning_kanji = self.all_kanjis[:10]
+        
         self.save() 
 
 

@@ -8,13 +8,18 @@ from .models import CoreDataProcessing
 @permission_classes([IsAuthenticated])
 def onboard(request):
     # Only receives a list of kanji and updates it in the model
+    user = request.user
+
     try:
         kanji_list = request.data['kanji_list']
-        user = request.user
+        user.coredataprocessing.process_onboarding(kanji_list)
+    except KeyError:
+        return Response({"error": "Function excepts a list of kanji that user already knows, \"kanji_list\""}, status=400)
+    except CoreDataProcessing.DoesNotExist:
+        CoreDataProcessing.objects.create(user=user)
         user.coredataprocessing.process_onboarding(kanji_list)
 
-    except KeyError:
-        return Response({"error": "Function excepts a list of kanji that user already knows"}, status=400)
+    return Response({"message": "Onboarding successful."})
 
 
 
