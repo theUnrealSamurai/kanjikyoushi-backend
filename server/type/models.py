@@ -1,3 +1,4 @@
+import re
 from django.db import models
 from django.contrib.auth.models import User
 from .utils.fetch_sentence import fetch_learning_sentence, fetch_test_sentence
@@ -59,7 +60,7 @@ class CoreDataProcessing(models.Model):
         if test:
             sentence_dict = fetch_test_sentence(self.user_kanji_level, 
                                                 self.learned_kanji, 
-                                                kanjis_ready_to_test)
+                                                ''.join(kanjis_ready_to_test))
             return test, sentence_dict
         else:
             sentence_dict = fetch_learning_sentence(self.user_kanji_level, 
@@ -67,3 +68,11 @@ class CoreDataProcessing(models.Model):
                                                     self.learned_kanji)
             return test, sentence_dict
 
+    def update_learning_sentence(self, sentence):
+        kanjis_in_sentence = re.findall(r'[\u4e00-\u9faf]', sentence)
+        for i in kanjis_in_sentence:
+            try:
+                self.character_type_counts[i] += 1
+            except KeyError:
+                self.character_type_counts[i] = 1
+        self.save()

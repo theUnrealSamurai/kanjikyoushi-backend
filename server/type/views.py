@@ -23,7 +23,7 @@ def onboard(request):
 
 
 
-@api_view(['GET'])
+@api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def render_sentence(request):
     try: 
@@ -47,3 +47,38 @@ def render_sentence(request):
     
     return Response(response_data)
 
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def update_learning_sentence(request):
+    user = request.user
+    try:
+        user.coredataprocessing.update_learning_sentence(request.data['sentence'])
+    except KeyError:
+        return Response({"error": "Function excepts a sentence to update the Typing Statistics."}, status=400)
+ 
+    return Response({"message": "Sentence updated successfully."})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def validate_test(request):
+    user = request.user
+    try:
+        test_result = user.coredataprocessing.validate_test(request.data['sentence'])
+    except KeyError:
+        return Response({"error": "Function excepts a sentence to validate the test."}, status=400)
+    
+    return Response({"test_result": test_result})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def skip_test(request):
+    user = request.user
+    try:
+        user.coredataprocessing.skip_test(request.data['sentence'])
+    except KeyError:
+        return Response({"error": "Function excepts a sentence to skip the test."}, status=400)
+    
+    return Response({"message": "Test skipped successfully."})
