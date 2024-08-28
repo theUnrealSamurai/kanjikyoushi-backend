@@ -12,13 +12,25 @@ class CoreDataProcessing(models.Model):
     learning_kanji = models.CharField(max_length=50, blank=True)
 
     penalty_kanji = models.CharField(max_length=25, blank=True)
+    penalty_char_counts = models.JSONField(default=dict)
     character_type_counts = models.JSONField(default=dict)
 
     test_threshold = models.SmallIntegerField(default=5)
+    penalty_threshold = models.SmallIntegerField(default=5)
 
     all_kanjis = models.CharField(max_length=50000, blank=True)
-    all_kanjis = ''.join(line.strip() for line in open('assets/kanjiJLPT.txt', 'r', encoding='utf-8').readlines())
-    
+
+    def __init__(self, *args, **kwargs):
+        super(CoreDataProcessing, self).__init__(*args, **kwargs)
+        # Initialize all_kanjis only if it's empty
+        if not self.all_kanjis:
+            try:
+                with open('assets/kanjiJLPT.txt', 'r', encoding='utf-8') as file:
+                    self.all_kanjis = ''.join(line.strip() for line in file.readlines())
+            except FileNotFoundError:
+                # Handle the error if the file is not found
+                self.all_kanjis = ''
+                print("Error: kanjiJLPT.txt file not found.")    
 
     def __str__(self):
         return self.user.username
@@ -26,17 +38,27 @@ class CoreDataProcessing(models.Model):
 
     def process_onboarding(self, kanji_list):
         """
-            takes a list of kanjis from the front end and updates it in the learned kanji. 
-            plus processess for unlearned kanji and updates the learning kanji.
+        Takes a list of kanjis from the front end and updates it in the learned kanji. 
+        Plus processes for unlearned kanji and updates the learning kanji.
         """
+        try:
+            with open('assets/kanjiJLPT.txt', 'r', encoding='utf-8') as file:
+                self.all_kanjis = ''.join(line.strip() for line in file.readlines())
+        except FileNotFoundError:
+            # Handle the error if the file is not found
+            self.all_kanjis = ''
+            print("Error: kanjiJLPT.txt file not found.")    
 
-        self.learned_kanji = kanji_list
-        for i in kanji_list:
-            self.all_kanjis = self.all_kanjis.replace(i, "")
-        self.save()
+        # self.__init__(force_onboard=True)
+
+        self.learned_kanji = ''.join(kanji_list)
+        for kanji in kanji_list:
+            self.all_kanjis = self.all_kanjis.replace(kanji, "")
+
         self.learning_kanji = self.all_kanjis[:10]
-        
-        self.save() 
+        self.all_kanjis = self.all_kanjis[10:]
+        self.save()
+
 
 
     def fetch_sentence(self):
@@ -68,11 +90,62 @@ class CoreDataProcessing(models.Model):
                                                     self.learned_kanji)
             return test, sentence_dict
 
-    def update_learning_sentence(self, sentence):
+    def update_character_type_count(self, sentence: str) -> None:
         kanjis_in_sentence = re.findall(r'[\u4e00-\u9faf]', sentence)
-        for i in kanjis_in_sentence:
-            try:
-                self.character_type_counts[i] += 1
-            except KeyError:
-                self.character_type_counts[i] = 1
+        for kanji in kanjis_in_sentence:
+            self.character_type_counts[kanji] = self.character_type_counts.get(kanji, 0) + 1
+            if kanji in self.penalty_kanji:
+                self.penalty_char_counts[kanji] = self.penalty_char_counts.get(kanji, 0) + 1
+
+        for kanji in list(self.penalty_char_counts.keys()):
+            if self.penalty_char_counts[kanji] > self.penalty_threshold:
+                self.penalty_kanji = self.penalty_kanji.replace(kanji, '')
+                del self.penalty_char_counts[kanji]
+
+        self.save()
+
+
+    def test_passed(self, sentence):
+        self.update_character_type_count(sentence)
+        kanjis = re.findall(r'[\u4e00-\u9faf]', sentence)
+
+        for kanji in kanjis:
+            if kanji in self.penalty_kanji:
+                self.penalty_kanji = self.penalty_kanji.replace(kanji, '')
+            if kanji in self.penalty_char_counts:
+                del self.penalty_char_counts[kanji]
+
+
+        for kanji in list(self.learning_kanji):
+            if kanji in kanjis:
+                self.learned_kanji += kanji
+                self.learning_kanji = self.learning_kanji.replace(kanji, '')
+                self.all_kanjis = self.all_kanjis.replace(kanji, '')
+
+        while len(self.learning_kanji) < 10 and self.all_kanjis:
+            new_kanji = self.all_kanjis[0]
+            self.learning_kanji += new_kanji
+            self.all_kanjis = self.all_kanjis[1:]
+
+        self.save()
+
+    def skip_test(self, skipped_kanji):
+        for kanji in skipped_kanji:
+            if kanji not in self.penalty_kanji:
+                self.penalty_kanji += kanji
+            
+            self.penalty_char_counts[kanji] = 0
+            
+            if kanji in self.learned_kanji:
+                self.learned_kanji = self.learned_kanji.replace(kanji, '')
+                self.learning_kanji += kanji
+                
+                if len(self.learning_kanji) > 23:
+                    removed_kanji = self.learning_kanji[0]
+                    self.learning_kanji = self.learning_kanji[1:]
+                    
+                    # Add the removed kanji back to all_kanjis if it's not in learned_kanji
+                    if removed_kanji not in self.learned_kanji:
+                        self.all_kanjis = removed_kanji + self.all_kanjis
+
         self.save()

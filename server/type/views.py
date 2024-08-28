@@ -53,7 +53,7 @@ def render_sentence(request):
 def update_learning_sentence(request):
     user = request.user
     try:
-        user.coredataprocessing.update_learning_sentence(request.data['sentence'])
+        user.coredataprocessing.update_character_type_count(request.data['sentence'])
     except KeyError:
         return Response({"error": "Function excepts a sentence to update the Typing Statistics."}, status=400)
  
@@ -62,14 +62,14 @@ def update_learning_sentence(request):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-def validate_test(request):
+def test_passed(request):
     user = request.user
     try:
-        test_result = user.coredataprocessing.validate_test(request.data['sentence'])
+        user.coredataprocessing.test_passed(request.data['sentence'])
     except KeyError:
         return Response({"error": "Function excepts a sentence to validate the test."}, status=400)
     
-    return Response({"test_result": test_result})
+    return Response({"test_result": "Successful"})
 
 
 @api_view(['POST'])
@@ -77,7 +77,7 @@ def validate_test(request):
 def skip_test(request):
     user = request.user
     try:
-        user.coredataprocessing.skip_test(request.data['sentence'])
+        user.coredataprocessing.skip_test(request.data['skipped_kanjis'])
     except KeyError:
         return Response({"error": "Function excepts a sentence to skip the test."}, status=400)
     
