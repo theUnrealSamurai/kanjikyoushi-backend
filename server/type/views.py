@@ -14,7 +14,7 @@ def onboard(request):
         kanji_list = request.data['kanji_list']
         user.coredataprocessing.process_onboarding(kanji_list)
     except KeyError:
-        return Response({"error": "Function excepts a list of kanji that user already knows, \"kanji_list\""}, status=400)
+        return Response({"error": "Function excepts a list of kanji that user already knows, 'kanji_list'"}, status=400)
     except CoreDataProcessing.DoesNotExist:
         CoreDataProcessing.objects.create(user=user)
         user.coredataprocessing.process_onboarding(kanji_list)
