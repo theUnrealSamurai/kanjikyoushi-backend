@@ -1,6 +1,7 @@
+import re
 import random
 import pandas as pd
-from .utils import contains_kanji, contains_only_allowed_kanji
+from .utils import contains_kanji, contains_only_allowed_kanji, fetch_kanji_data
 
 
 df = pd.read_csv('assets/sentence_db.tsv', sep='\t')
@@ -21,15 +22,16 @@ def fetch_learning_sentence(user_kanji_level: int, learning_kanji: str, learned_
     if filtered_indexes:
         random_index = random.choice(filtered_indexes)
         random_row = df.loc[random_index]
+
+        fetched_sentence = random_row['jp']
+        kanji_in_fetched_sentence = re.findall(r'[\u4e00-\u9faf]', fetched_sentence)
+        kanji_data = fetch_kanji_data(kanji_in_fetched_sentence)
+
         return {
             "japanese": random_row['jp'],
             "english": random_row['en'],
             "romaji": "this is a sample romaji sentence",
-            "kanji": [
-                {"kanji": "日", "meaning": "にち", "kunyomi": "ひ", "onyomi": "に"},
-                {"kanji": "本", "meaning": "ほん", "kunyomi": "もと", "onyomi": "ほん"},
-                {"kanji": "語", "meaning": "ご", "kunyomi": "かたる", "onyomi": "ご"},
-            ],
+            "kanji": kanji_data,
             "vocabulary": [
                 {"日本語": ["Japanese", "Japanese Language"]},
                 {"日本": ["Japan"]},
