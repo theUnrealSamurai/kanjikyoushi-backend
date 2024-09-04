@@ -39,7 +39,8 @@ def render_sentence(request):
     if not test:
         response_data = {
             "test": test,
-            "sentence": fetched_sentence,
+            "japanese": fetched_sentence["japanese"],
+            "english": fetched_sentence["english"],
             "romaji": fetched_sentence['romaji'],
             "kanji": fetched_sentence['kanji'],
             "vocabulary": fetched_sentence['vocabulary'],
