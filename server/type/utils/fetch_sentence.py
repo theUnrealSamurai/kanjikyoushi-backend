@@ -59,3 +59,5 @@ def fetch_test_sentence(user_kanji_level: int, learned_kanji: str, test_kanji: s
             "japanese": random_row['jp'],
             "english": random_row['en'],
         }
+    else:
+        raise Exception("No sentence found matching the criteria.")

@@ -33,7 +33,8 @@ def render_sentence(request):
     
     response_data = {
         "test": test,
-        "sentence": fetched_sentence
+        "sentence": fetched_sentence["japanese"],
+        "sentence_counter": fetched_sentence["sentence_counter"],
     }
 
     if not test:
@@ -42,6 +43,7 @@ def render_sentence(request):
             "japanese": fetched_sentence["japanese"],
             "english": fetched_sentence["english"],
             "romaji": fetched_sentence['romaji'],
+            "sentence_counter": fetched_sentence["sentence_counter"],
             "kanji": fetched_sentence['kanji'],
             "vocabulary": fetched_sentence['vocabulary'],
         }
@@ -54,7 +56,7 @@ def render_sentence(request):
 def update_learning_sentence(request):
     user = request.user
     try:
-        user.coredataprocessing.update_character_type_count(request.data['sentence'])
+        user.coredataprocessing.update_character_type_count(request.data['sentence'], False)
     except KeyError:
         return Response({"error": "Function excepts a sentence to update the Typing Statistics."}, status=400)
  

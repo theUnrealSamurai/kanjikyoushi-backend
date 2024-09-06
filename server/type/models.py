@@ -14,6 +14,8 @@ class CoreDataProcessing(models.Model):
     penalty_kanji = models.CharField(max_length=25, blank=True)
     penalty_char_counts = models.JSONField(default=dict)
     character_type_counts = models.JSONField(default=dict)
+    learning_sentence_counter = models.IntegerField(default=0)
+    test_sentence_counter = models.IntegerField(default=0)
 
     test_threshold = models.SmallIntegerField(default=5)
     penalty_threshold = models.SmallIntegerField(default=5)
@@ -83,14 +85,19 @@ class CoreDataProcessing(models.Model):
             sentence_dict = fetch_test_sentence(self.user_kanji_level, 
                                                 self.learned_kanji, 
                                                 ''.join(kanjis_ready_to_test))
+            sentence_dict['sentence_counter'] = self.test_sentence_counter
             return test, sentence_dict
         else:
             sentence_dict = fetch_learning_sentence(self.user_kanji_level, 
                                                     self.learning_kanji,    
                                                     self.learned_kanji)
+            sentence_dict['sentence_counter'] = self.learning_sentence_counter
             return test, sentence_dict
 
-    def update_character_type_count(self, sentence: str) -> None:
+    def update_character_type_count(self, sentence: str, test: bool) -> None:
+        if not test:
+            self.learning_sentence_counter += 1
+
         kanjis_in_sentence = re.findall(r'[\u4e00-\u9faf]', sentence)
         for kanji in kanjis_in_sentence:
             self.character_type_counts[kanji] = self.character_type_counts.get(kanji, 0) + 1
@@ -106,7 +113,8 @@ class CoreDataProcessing(models.Model):
 
 
     def test_passed(self, sentence):
-        self.update_character_type_count(sentence)
+        self.test_sentence_counter += 1
+        self.update_character_type_count(sentence, test=True)
         kanjis = re.findall(r'[\u4e00-\u9faf]', sentence)
 
         for kanji in kanjis:
