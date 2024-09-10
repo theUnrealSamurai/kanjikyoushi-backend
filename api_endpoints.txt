@@ -1,2 +1,54 @@
-Login 
-    - 
+Signup
+    - localhost:8000/home/signup
+    {
+        "username": "test",
+        "password": "User123*",
+        "email": "testuser123@test.com"
+    }
+
+
+- Login
+    - localhost:8000/home/login
+    {
+        "username": "banana",
+        "password": "User123*"
+    }
+
+
+- Onboard
+    - localhost:8000/type/onboard
+    {
+        "kanji_list": "金木元"
+    }
+
+
+- Render
+    - localhost:8000/type/render_sentence
+    - no input, use for rendering a sentence
+
+
+- Update Learning Sentence
+    - localhost:8000/type/update_learning_sentence
+    {
+        "sentence": "本は4ドルです。"
+    }
+    note: This function is called after the user types a sentence (while Learning not testing).
+                The sentence is validated in the front end first and then returned.  
+                Validation: The sentence user types and the sentence rendered should be same.
+
+
+- Test Passed
+    - localhost:8000/type/test_passed
+    {
+        "sentence": "本は4ドルです。"
+    }
+    note: Called when the user passes a test. 
+                Validation: The sentence user types and the sentence rendered test sentence should be same.
+
+
+- Skip Test
+    - localhost:8000/type/skip_test
+    {
+        "skipped_kanjis": "本深"
+    }
+    note: Called after the user chooses to skip a test. Ask them the kanjis that they didn't know and return that as a string
