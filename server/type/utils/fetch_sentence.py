@@ -6,11 +6,9 @@ from .utils import contains_kanji, contains_only_allowed_kanji, fetch_kanji_data
 
 df = pd.read_csv('assets/sentence_db.tsv', sep='\t')
 
-
-
-def fetch_learning_sentence(user_kanji_level: int, learning_kanji: str, learned_kanji: str):
+def fetch_learning_sentence(learning_kanji: str, learned_kanji: str):
     global df
-    df = df[df['JLPT'] == "N" + str(user_kanji_level)] # Filter DataFrame by JLPT level
+    df = df[df['JLPT'] == "N5"]
 
     # Filter all the sentences containing the learning kanji
     indexes_with_kanji = df[df['jp'].apply(lambda x: contains_kanji(x, learning_kanji))].index.tolist()
@@ -42,9 +40,9 @@ def fetch_learning_sentence(user_kanji_level: int, learning_kanji: str, learned_
         raise Exception("No sentence found matching the criteria.")
     
 
-def fetch_test_sentence(user_kanji_level: int, learned_kanji: str, test_kanji: str):
+def fetch_test_sentence(learned_kanji: str, test_kanji: str):
     global df
-    df = df[df['JLPT'] == "N" + str(user_kanji_level)] # Filter DataFrame by JLPT level
+    df = df[df['JLPT'] == "N5"]
 
     # Filter all the sentences containing the testing kanji
     indexes_with_kanji = df[df['jp'].apply(lambda x: contains_kanji(x, test_kanji))].index.tolist()
