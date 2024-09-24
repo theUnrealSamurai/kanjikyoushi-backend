@@ -1,10 +1,10 @@
-import re
+import re, random, json
 from django.db import models
 from django.contrib.auth.models import User
 from django.utils import timezone
 from fsrs import FSRS, Card, Rating 
 from django.db.models import JSONField
-from .utils.fetch_sentence import fetch_learning_sentence
+from .utils.fetch_sentence import fetch_practice_sentence, fetch_learning_sentence
 
 
 f = FSRS()
@@ -34,12 +34,20 @@ class CoreDataProcessing(models.Model):
         The spaced repetition will not be applied to these kanjis until the user makes a mistakes and picks to learn them. 
         """
         self.known_kanji = kanji_list
-        with open("assets/kanjiJLPT.txt", 'r', encoding='utf-8') as file:
-            self.upcomming_kanji = ''.join(line.strip() for line in file.readlines())
+        with open("assets/jlpt_kanji_lists.json", 'r', encoding='utf-8') as file:
+            kanji_json = json.load(file)
+            kanjis = kanji_json["N5"] + kanji_json["N4"] + kanji_json["N3"] + kanji_json["N2"] + kanji_json["N1"]
+            self.upcomming_kanji = ''.join(kanjis)
 
         # Making sure the user doesn't have to learn the kanjis that they know already
         for kanji in self.known_kanji:
             self.upcomming_kanji = self.upcomming_kanji.replace(kanji, "")
+
+        # reset to defaults
+        self.char_type_counts = {}
+        self.temp_char_type_counts = {}
+        self.learned_kanji = ""
+        self.kanji_json = {}
 
         self.save()
         return self.known_kanji
@@ -47,8 +55,20 @@ class CoreDataProcessing(models.Model):
 
     def render_practice(self):
         "randomly render a sentence using the first 5 kanjis in the upcomming kanji list"
-        kanjis_for_sentence = self.upcomming_kanji[:5]
-        response_json = fetch_learning_sentence(kanjis_for_sentence, self.learned_kanji + self.known_kanji)
+        
+        # Logic to make sure the user always completes typing the first kanji 3 times before other kanjis 3 times. 
+        kanji_for_sentence = ""
+        print(self.upcomming_kanji[:5])
+
+        while True:
+            kanji_for_sentence = random.choice(self.upcomming_kanji[:5])
+            if kanji_for_sentence == self.upcomming_kanji[0]:
+                break
+            if self.temp_char_type_counts.get(self.upcomming_kanji[0], 0) == self.learning_count-1 and self.temp_char_type_counts.get(kanji_for_sentence, 0) == self.learning_count-1:
+                continue
+            else:
+                break
+        response_json = fetch_practice_sentence(kanji_for_sentence)
         return response_json
     
 
