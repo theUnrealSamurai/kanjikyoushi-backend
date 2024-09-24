@@ -2,25 +2,11 @@ import pandas as pd
 import re 
 import json
 
-df = pd.read_csv("assets/kanji_data.tsv", sep='\t')
+
 kanji_data = {}
 
-
-def safe_eval(x):
-    try:
-        return eval(x)
-    except:
-        return x
-
-
-for _, row in df.iterrows():
-    kanji = row['kanji']
-    kanji_data[kanji] = {
-        'on_readings': safe_eval(row['on_readings']),
-        'kun_readings': safe_eval(row['kun_readings']),
-        'stroke_count': row['stroke_count'],
-        'meanings': safe_eval(row['meanings'])
-    }
+with open("assets/kanji_data.json", 'r', encoding='utf-8') as file:
+    kanji_data = json.load(file)
 
 
 def contains_kanji(sentence, kanji_list):
