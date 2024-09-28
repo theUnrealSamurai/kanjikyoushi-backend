@@ -9,7 +9,7 @@ def load_and_merge_json_files(directory: str):
     merged_data = {}
     
     # List all JSON files in the directory
-    json_files = [f"{directory}/indexed_sentences_N{i}.json" for i in range(1, 6)]
+    json_files = [f"{directory}/indexed_sentences_N{i}.json" for i in ["1", "2", "3", "4", "5", "1+"]]
     
     for file_path in json_files:
         with open(file_path, 'r', encoding='utf-8') as file:
