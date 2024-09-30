@@ -4,10 +4,13 @@ from django.contrib.auth.models import User
 from django.utils import timezone
 from fsrs import FSRS, Card, Rating 
 from django.db.models import JSONField
-from .utils.fetch_sentence import fetch_practice_sentence, fetch_learning_sentence
+from .utils.fetch_sentence import fetch_practice_sentence, fetch_revision_sentence
 
 
 f = FSRS()
+with open("assets/kanji_end_index.json", 'r', encoding='utf-8') as file:
+    kanji_end_index = json.load(file)
+
 
 class CoreDataProcessing(models.Model):
     
@@ -20,6 +23,7 @@ class CoreDataProcessing(models.Model):
     temp_char_type_counts = JSONField(default=dict)
 
     learning_count = models.IntegerField(default=3) # The revision for the kanji doesn't start until the user typed it for 3 times. 
+    max_rows = models.IntegerField(default=0)
 
     kanji_json = JSONField(default=dict)
 
@@ -36,7 +40,7 @@ class CoreDataProcessing(models.Model):
         self.known_kanji = kanji_list
         with open("assets/jlpt_kanji_lists.json", 'r', encoding='utf-8') as file:
             kanji_json = json.load(file)
-            kanjis = kanji_json["N5"] + kanji_json["N4"] + kanji_json["N3"] + kanji_json["N2"] + kanji_json["N1"]
+            kanjis = kanji_json["N5"] + kanji_json["N4"] + kanji_json["N3"] + kanji_json["N2"] + kanji_json["N1"] + kanji_json["N1+"]
             self.upcomming_kanji = ''.join(kanjis)
 
         # Making sure the user doesn't have to learn the kanjis that they know already
@@ -48,6 +52,7 @@ class CoreDataProcessing(models.Model):
         self.temp_char_type_counts = {}
         self.learned_kanji = ""
         self.kanji_json = {}
+        self.max_rows = 0
 
         self.save()
         return self.known_kanji
@@ -58,7 +63,6 @@ class CoreDataProcessing(models.Model):
         
         # Logic to make sure the user always completes typing the first kanji 3 times before other kanjis 3 times. 
         kanji_for_sentence = ""
-        print(self.upcomming_kanji[:5])
 
         while True:
             kanji_for_sentence = random.choice(self.upcomming_kanji[:5])
@@ -87,7 +91,7 @@ class CoreDataProcessing(models.Model):
                 self.temp_char_type_counts[kanji] = self.temp_char_type_counts.get(kanji, 0) + 1
 
         # Move the kanji to learned kanji and erase data from the temp count for a fresh restart if the user forgets the kanji. 
-        kanji_to_remove = []
+        kanji_to_remove, set_max_rows = [], False
         for kanji, count in self.temp_char_type_counts.items():
             if count >= self.learning_count:
                 self.learned_kanji += kanji
@@ -97,10 +101,14 @@ class CoreDataProcessing(models.Model):
                 card = Card()
                 card, _ = f.review_card(card, Rating.Good)
                 self.kanji_json[kanji] = card.to_dict()
+                set_max_rows = True
 
         # Remove processed kanji from temp_char_type_counts
         for kanji in kanji_to_remove:
             self.temp_char_type_counts.pop(kanji, None)
+
+        if set_max_rows:
+            self.max_rows = kanji_end_index[self.learned_kanji[-1]]
 
         self.save()
 
@@ -119,16 +127,29 @@ class CoreDataProcessing(models.Model):
         if not due_cards:
             return {"message": "No cards to revise."}
         
-        kanjis = ''.join([kanji for kanji, _ in due_cards])
-        response_json = fetch_learning_sentence(kanjis, self.learned_kanji + self.known_kanji)
+        due_kanjis = ''.join([kanji for kanji, _ in due_cards])
+        print("Due Kanjis: ", due_kanjis)
+        due_kanjis = "今日来"
+        print("Due Kanjis: ", due_kanjis)
+        response_json = fetch_revision_sentence(due_kanjis, self.max_rows)
         return response_json
 
 
-    def update_revision(self, sentence):
-        kanjis = re.findall(r'[\u4e00-\u9faf]', sentence)
-        for kanji in kanjis:
-            card = Card.from_dict(self.kanji_json[kanji])
-            card, _ = f.review_card(card, Rating.Easy)
+    def update_revision(self, kanji_rating_dict):
+        user_rating = {
+            "easy": Rating.Easy,
+            "good": Rating.Good,
+            "hard": Rating.Hard,
+            "again": Rating.Again,
+        }
+        for kanji, rating in kanji_rating_dict.items():
+            self.char_type_counts[kanji] = self.char_type_counts.get(kanji, 0) + 1
+            if kanji in self.known_kanji and rating != "again":
+                continue
+            if kanji in self.kanji_json:
+                card = Card.from_dict(self.kanji_json[kanji])
+            else: 
+                card = Card()
+            card, _ = f.review_card(card, user_rating[rating])
             self.kanji_json[kanji] = card.to_dict()
-
         self.save()

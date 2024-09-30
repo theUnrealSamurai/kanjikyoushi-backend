@@ -47,7 +47,7 @@ def render_revision(request):
 @permission_classes([IsAuthenticated])
 def update_revision(request):
     try:
-        request.user.coredataprocessing.update_revision(request.data['sentence'])
+        request.user.coredataprocessing.update_revision(request.data['kanji_rating_dict'])
         return Response({"message": "Revision updated."})
     except KeyError:
         return Response({"error": "Function excepts a 'sentence'"}, status=400)

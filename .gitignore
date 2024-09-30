@@ -11,3 +11,4 @@ server/type/__pycache__/
 server/type/migrations/__pycache__/
 server/type/utils/__pycache__/
 server/type/t5/
+server/assets/sorted_sentences.tsv
