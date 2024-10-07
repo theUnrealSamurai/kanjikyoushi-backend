@@ -40,8 +40,7 @@ def fetch_practice_sentence(kanji: str):
 
 
 def fetch_revision_sentence(due_kanji, unknown_kanji, maxrow):
-    minrow = get_minrows(due_kanji, maxrow)
-    index = search_max_kanji_match(sparse_matrix, sparse_matrix_kanji, due_kanji, unknown_kanji, minrow, maxrow)
+    index = search_max_kanji_match(sparse_matrix, sparse_matrix_kanji, due_kanji, unknown_kanji, maxrow)
     row = fetch_psql_row(index)
     
     return {

@@ -158,6 +158,8 @@ class CoreDataProcessing(models.Model):
                 card = Card.from_dict(self.kanji_json[kanji])
             else: 
                 card = Card()
+                self.learned_kanji += kanji
+                self.known_kanji = self.known_kanji.replace(kanji, "")
             card, _ = f.review_card(card, user_rating[rating])
             self.kanji_json[kanji] = card.to_dict()
         self.save()
