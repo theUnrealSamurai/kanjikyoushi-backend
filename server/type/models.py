@@ -8,7 +8,7 @@ from .utils.fetch_sentence import fetch_practice_sentence, fetch_revision_senten
 
 
 f = FSRS()
-with open("assets/kanji_end_index.json", 'r', encoding='utf-8') as file:
+with open("assets/n1n5_kanji_row_end_index.json", 'r', encoding='utf-8') as file:
     kanji_end_index = json.load(file)
 
 
@@ -37,10 +37,17 @@ class CoreDataProcessing(models.Model):
         This function is called only once when the user first creates an account, 
         The spaced repetition will not be applied to these kanjis until the user makes a mistakes and picks to learn them. 
         """
+        if not kanji_list:
+            kanji_list = "一二三四五六七八九十百千万"
+        else:
+            for kanji in "一二三四五六七八九十百千万":
+                if kanji not in kanji_list:
+                    kanji_list += kanji
+
         self.known_kanji = kanji_list
         with open("assets/jlpt_kanji_lists.json", 'r', encoding='utf-8') as file:
             kanji_json = json.load(file)
-            kanjis = kanji_json["N5"] + kanji_json["N4"] + kanji_json["N3"] + kanji_json["N2"] + kanji_json["N1"] + kanji_json["N1+"]
+            kanjis = kanji_json["N5"] + kanji_json["N4"] + kanji_json["N3"] + kanji_json["N2"] + kanji_json["N1"]
             self.upcomming_kanji = ''.join(kanjis)
 
         # Making sure the user doesn't have to learn the kanjis that they know already
@@ -60,6 +67,9 @@ class CoreDataProcessing(models.Model):
 
     def render_practice(self):
         "randomly render a sentence using the first 5 kanjis in the upcomming kanji list"
+
+        if not self.upcomming_kanji:
+            return {"redirect": "true", "url": "/congratulations/"}
         
         # Logic to make sure the user always completes typing the first kanji 3 times before other kanjis 3 times. 
         kanji_for_sentence = ""
@@ -107,6 +117,10 @@ class CoreDataProcessing(models.Model):
         for kanji in kanji_to_remove:
             self.temp_char_type_counts.pop(kanji, None)
 
+        # If len of self.upcomming_kanji is 0, then redirect to a different page saying Congratulations.
+        if not self.upcomming_kanji:
+            return {"redirect": "true", "url": "/congratulations/"}
+
         if set_max_rows:
             self.max_rows = kanji_end_index[self.learned_kanji[-1]]
 
@@ -121,17 +135,11 @@ class CoreDataProcessing(models.Model):
             if card.due <= now:
                 due_cards.append((kanji, card.due))
         
-        # Sort by due date, oldest first
-        due_cards.sort(key=lambda x: x[1])
-        
         if not due_cards:
             return {"message": "No cards to revise."}
         
-        due_kanjis = ''.join([kanji for kanji, _ in due_cards])
-        print("Due Kanjis: ", due_kanjis)
-        due_kanjis = "今日来"
-        print("Due Kanjis: ", due_kanjis)
-        response_json = fetch_revision_sentence(due_kanjis, self.max_rows)
+        due_kanjis = [kanji for kanji, _ in due_cards]
+        response_json = fetch_revision_sentence(due_kanjis, self.upcomming_kanji, self.max_rows)
         return response_json
 
 
@@ -144,7 +152,7 @@ class CoreDataProcessing(models.Model):
         }
         for kanji, rating in kanji_rating_dict.items():
             self.char_type_counts[kanji] = self.char_type_counts.get(kanji, 0) + 1
-            if kanji in self.known_kanji and rating != "again":
+            if kanji in self.known_kanji and rating == "easy":
                 continue
             if kanji in self.kanji_json:
                 card = Card.from_dict(self.kanji_json[kanji])

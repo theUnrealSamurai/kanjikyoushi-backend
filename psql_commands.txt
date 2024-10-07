@@ -1,0 +1,42 @@
+## Use this code to insert the data into the psql
+
+CREATE DATABASE typekanji;
+
+\c typekanji
+
+-- Create a temporary table to hold all the data
+CREATE TEMPORARY TABLE temp_n1plus (
+    index INTEGER,
+    text TEXT,
+    score_ev_20230516 FLOAT,
+    kanji TEXT,
+    ranks INTEGER
+);
+
+-- Load data from the TSV file into the temporary table
+COPY temp_n1plus (index, text, score_ev_20230516, kanji, ranks)
+FROM '/tmp/df_n1plus.tsv' 
+DELIMITER E'\t' 
+CSV 
+HEADER 
+ENCODING 'UTF-8';
+
+-- Create the n1plus table if it doesn't exist
+-- We'll use the 'index' column as the primary key
+CREATE TABLE IF NOT EXISTS n1plus (
+    index INTEGER PRIMARY KEY,
+    text TEXT
+);
+
+-- Insert data from the temporary table into n1plus
+INSERT INTO n1plus (index, text)
+SELECT index, text
+FROM temp_n1plus
+ON CONFLICT (index) DO UPDATE
+SET text = EXCLUDED.text;
+
+-- Optionally, drop the temporary table
+DROP TABLE temp_n1plus;
+
+-- Verify the data insertion
+SELECT COUNT(*) FROM n1plus;
