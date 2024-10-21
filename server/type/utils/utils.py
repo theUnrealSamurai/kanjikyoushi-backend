@@ -1,14 +1,15 @@
-import re, os
+import re, os, subprocess
 import json
 import pickle
 import numpy as np
 import pandas as pd
 from scipy.sparse import csr_matrix
 from django.db import connection
-
+import translate
 
 
 kanji_data, max_row_threshold = {}, 300000
+translator = translate.Translator('en', from_lang='ja')
 
 with open("assets/kanji_data.json", 'r', encoding='utf-8') as file:
     kanji_data = json.load(file)
@@ -137,6 +138,19 @@ def search_max_kanji_match(sparse_matrix: csr_matrix, unique_kanji: list, target
         raise ValueError("No sentence found that matches the criteria")
 
     return max_match_index
+
+
+def get_ichiran_data(sentence):
+    # takes a japanese sentences. runs ichiran-cli -i {sentence} and returns the output as a string
+    result = subprocess.run(['ichiran-cli', '-i', sentence], 
+                            capture_output=True, 
+                            text=True, 
+                            check=True)
+    return result.stdout
+
+
+def translate(sentence):
+    return translator.translate(sentence)
 
 
 sparse_matrix, sparse_matrix_kanji = load_kanji_sparse_matrix("assets/sparse_matrix_n1n5")

@@ -31,10 +31,10 @@ def fetch_practice_sentence(kanji: str):
 
     return {
         "japanese": row[1],
-        "english": "whoopsies I'm yet fetch this data from google translate",
+        "english": translate(row[1]),
         "romaji": row[4].split("\n\n*")[0].strip(),
         "kanji_data": fetch_kanji_data(re.findall(r'[\u4e00-\u9faf]', row[1])),
-        "vocabulary": row[4].split("\n\n*")[1:],
+        "definitions": get_ichiran_data(row[1]),
     }
 
 
@@ -45,8 +45,8 @@ def fetch_revision_sentence(due_kanji, unknown_kanji, maxrow):
     
     return {
         "japanese": row[1],
-        "english": "whoopsies I'm yet fetch this data from google translate",
+        "english": translate(row[1]), 
         "romaji": row[4].split("\n\n*")[0].strip(),
         "kanji_data": fetch_kanji_data(re.findall(r'[\u4e00-\u9faf]', row[1])),
-        "vocabulary": row[4].split("\n\n*")[1:],
+        "vocabulary": get_ichiran_data(row[1]),
     }
