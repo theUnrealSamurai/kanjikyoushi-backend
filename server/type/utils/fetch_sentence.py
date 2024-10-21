@@ -28,13 +28,14 @@ kanji_indices = load_and_merge_json_files("assets")
 def fetch_practice_sentence(kanji: str):
     index = random.choice(kanji_indices[kanji])
     row = fetch_psql_row(index)
+    ichiran_data = get_ichiran_data(row[1])
 
     return {
         "japanese": row[1],
         "english": translate(row[1]),
-        "romaji": row[4].split("\n\n*")[0].strip(),
+        "romaji": ichiran_data.split("\n\n*")[0].strip(),
         "kanji_data": fetch_kanji_data(re.findall(r'[\u4e00-\u9faf]', row[1])),
-        "definitions": get_ichiran_data(row[1]),
+        "definitions": ichiran_data.split("\n\n")[1:],
     }
 
 
@@ -42,11 +43,12 @@ def fetch_practice_sentence(kanji: str):
 def fetch_revision_sentence(due_kanji, unknown_kanji, maxrow):
     index = search_max_kanji_match(sparse_matrix, sparse_matrix_kanji, due_kanji, unknown_kanji, maxrow)
     row = fetch_psql_row(index)
+    ichiran_data = get_ichiran_data(row[1])
     
     return {
         "japanese": row[1],
         "english": translate(row[1]), 
-        "romaji": row[4].split("\n\n*")[0].strip(),
+        "romaji": ichiran_data.split("\n\n*")[0].strip(),
         "kanji_data": fetch_kanji_data(re.findall(r'[\u4e00-\u9faf]', row[1])),
-        "vocabulary": get_ichiran_data(row[1]),
+        "definitions": ichiran_data.split("\n\n")[1:],
     }
