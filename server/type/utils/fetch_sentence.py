@@ -35,7 +35,7 @@ def fetch_practice_sentence(kanji: str):
         "english": translate(row[1]),
         "romaji": ichiran_data.split("\n\n*")[0].strip(),
         "kanji_data": fetch_kanji_data(re.findall(r'[\u4e00-\u9faf]', row[1])),
-        "definitions": ichiran_data.split("\n\n")[1:],
+        "definitions": ichiran_data.split("\n\n*")[1:],
     }
 
 
@@ -50,5 +50,6 @@ def fetch_revision_sentence(due_kanji, unknown_kanji, maxrow):
         "english": translate(row[1]), 
         "romaji": ichiran_data.split("\n\n*")[0].strip(),
         "kanji_data": fetch_kanji_data(re.findall(r'[\u4e00-\u9faf]', row[1])),
-        "definitions": ichiran_data.split("\n\n")[1:],
+        "definitions": ichiran_data.split("\n\n*")[1:],
+        "due_kanji": due_kanji,
     }

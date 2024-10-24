@@ -30,6 +30,7 @@ def contains_only_allowed_kanji(sentence: str, kanji_list: str) -> bool:
 
 
 def fetch_kanji_data(kanji_list):
+    kanji_list = list(dict.fromkeys(kanji_list))
     data = []
     for kanji in kanji_list:
         temp = kanji_data[kanji]
