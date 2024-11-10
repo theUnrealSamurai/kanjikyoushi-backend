@@ -50,4 +50,4 @@ def update_revision(request):
         request.user.coredataprocessing.update_revision(request.data['kanji_rating_dict'])
         return Response({"message": "Revision updated."})
     except KeyError:
-        return Response({"error": "Function excepts a 'sentence'"}, status=400)
+        return Response({"error": "Function excepts a 'kanji_rating_dict'"}, status=400)

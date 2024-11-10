@@ -22,6 +22,8 @@ class CoreDataProcessing(models.Model):
     char_type_counts = JSONField(default=dict)
     temp_char_type_counts = JSONField(default=dict)
 
+    learned_kanji_counter = models.IntegerField(default=0)
+
     learning_count = models.IntegerField(default=3) # The revision for the kanji doesn't start until the user typed it for 3 times. 
     max_rows = models.IntegerField(default=0)
 
@@ -83,6 +85,7 @@ class CoreDataProcessing(models.Model):
             else:
                 break
         response_json = fetch_practice_sentence(kanji_for_sentence)
+        response_json["learned_kanji"] = self.learned_kanji_counter
         return response_json
     
 
@@ -104,6 +107,7 @@ class CoreDataProcessing(models.Model):
         kanji_to_remove, set_max_rows = [], False
         for kanji, count in self.temp_char_type_counts.items():
             if count >= self.learning_count:
+                self.learned_kanji_counter += 1
                 self.learned_kanji += kanji
                 self.upcomming_kanji = self.upcomming_kanji.replace(kanji, "")
                 kanji_to_remove.append(kanji)
