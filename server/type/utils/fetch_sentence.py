@@ -45,6 +45,9 @@ def fetch_revision_sentence(due_kanji, unknown_kanji, maxrow):
     row = fetch_psql_row(index)
     ichiran_data = get_ichiran_data(row[1])
     
+    if not contains_kanji(row[1], due_kanji):
+        return None
+
     return {
         "japanese": row[1],
         "english": translate(row[1]), 

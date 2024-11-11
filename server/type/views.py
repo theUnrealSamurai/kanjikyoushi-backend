@@ -40,6 +40,8 @@ def update_practice(request):
 @permission_classes([IsAuthenticated])
 def render_revision(request):
     response = request.user.coredataprocessing.render_revision()
+    if not response:
+        return Response({"message": "No cards to revise."}, status=200)
     return Response(response)
 
 

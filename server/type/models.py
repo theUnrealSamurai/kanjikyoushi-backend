@@ -3,6 +3,7 @@ from django.db import models
 from django.contrib.auth.models import User
 from django.utils import timezone
 from fsrs import FSRS, Card, Rating 
+from rest_framework.response import Response
 from django.db.models import JSONField
 from .utils.fetch_sentence import fetch_practice_sentence, fetch_revision_sentence
 
@@ -140,10 +141,12 @@ class CoreDataProcessing(models.Model):
                 due_cards.append((kanji, card.due))
         
         if not due_cards:
-            return {"message": "No cards to revise."}
+            return None
         
         due_kanjis = [kanji for kanji, _ in due_cards]
         response_json = fetch_revision_sentence(due_kanjis, self.upcomming_kanji, self.max_rows)
+        if not response_json:
+            return None
         return response_json
 
 
