@@ -7,81 +7,49 @@ from .models import CoreDataProcessing
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def onboard(request):
-    # Only receives a list of kanji and updates it in the model
-    user = request.user
-
     try:
         kanji_list = request.data['kanji_list']
-        user.coredataprocessing.process_onboarding(kanji_list)
+        request.user.coredataprocessing.onboard(kanji_list)
     except KeyError:
         return Response({"error": "Function excepts a list of kanji that user already knows, 'kanji_list'"}, status=400)
-    except CoreDataProcessing.DoesNotExist:
-        CoreDataProcessing.objects.create(user=user)
-        user.coredataprocessing.process_onboarding(kanji_list)
+    except AttributeError:
+        CoreDataProcessing.objects.create(user=request.user)
+        request.user.coredataprocessing.onboard(kanji_list)
 
     return Response({"message": "Onboarding successful."})
 
 
-
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-def render_sentence(request):
-    try: 
-        test, fetched_sentence = request.user.coredataprocessing.fetch_sentence()
-    except CoreDataProcessing.DoesNotExist:
-        return Response({"error": "User does not have any data."}, status=404)  
-    
-    response_data = {
-        "test": test,
-        "sentence": fetched_sentence["japanese"],
-        "sentence_counter": fetched_sentence["sentence_counter"],
-    }
-
-    if not test:
-        response_data = {
-            "test": test,
-            "japanese": fetched_sentence["japanese"],
-            "english": fetched_sentence["english"],
-            "romaji": fetched_sentence['romaji'],
-            "sentence_counter": fetched_sentence["sentence_counter"],
-            "kanji": fetched_sentence['kanji'],
-            "vocabulary": fetched_sentence['vocabulary'],
-        }
-    
-    return Response(response_data)
+def render_practice(request):
+    kanji = request.user.coredataprocessing.render_practice()
+    return Response(kanji)
 
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-def update_learning_sentence(request):
-    user = request.user
+def update_practice(request):
     try:
-        user.coredataprocessing.update_character_type_count(request.data['sentence'], False)
+        request.user.coredataprocessing.update_practice(request.data['sentence'])
+        return Response({"message": "Practice updated."})
     except KeyError:
-        return Response({"error": "Function excepts a sentence to update the Typing Statistics."}, status=400)
- 
-    return Response({"message": "Sentence updated successfully."})
+        return Response({"error": "Function excepts a 'sentence'"}, status=400)
 
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-def test_passed(request):
-    user = request.user
-    try:
-        user.coredataprocessing.test_passed(request.data['sentence'])
-    except KeyError:
-        return Response({"error": "Function excepts a sentence to validate the test."}, status=400)
-    
-    return Response({"test_result": "Successful"})
+def render_revision(request):
+    response = request.user.coredataprocessing.render_revision()
+    if not response:
+        return Response({"message": "No cards to revise."}, status=200)
+    return Response(response)
 
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-def skip_test(request):
-    user = request.user
+def update_revision(request):
     try:
-        user.coredataprocessing.skip_test(request.data['skipped_kanjis'])
+        request.user.coredataprocessing.update_revision(request.data['kanji_rating_dict'])
+        return Response({"message": "Revision updated."})
     except KeyError:
-        return Response({"error": "Function excepts a sentence to skip the test."}, status=400)
-    
-    return Response({"message": "Test skipped successfully."})
+        return Response({"error": "Function excepts a 'kanji_rating_dict'"}, status=400)

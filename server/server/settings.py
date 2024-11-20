@@ -27,9 +27,15 @@ SECRET_KEY = 'django-insecure-uys#3-a1t(kgo9dvr6$m5v9yxv@9l4)a=0^884-=4f!)vr-ufu
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ["8550-2405-1200-312-500-4b1b-782d-f571-e547.ngrok-free.app", "localhost", "server-1khw.onrender.com"]
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', 'brave-wanted-joey.ngrok-free.app']
 CORS_ALLOWED_ORIGINS = [
-    'http://localhost:3000',
+    "http://localhost:3000",
+    "https://*.ngrok-free.app",  # Allow all ngrok subdomains
+]
+
+CSRF_TRUSTED_ORIGINS = [
+    "http://localhost:3000",
+    "https://*.ngrok-free.app",  # Allow all ngrok subdomains
 ]
 
 # Application definition
@@ -85,8 +91,12 @@ WSGI_APPLICATION = 'server.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': 'typekanji',
+        'USER': 'djangoserver',
+        'PASSWORD': 'djangoserver',
+        'HOST': 'localhost',
+        'PORT': '5432',
     }
 }
 
@@ -141,7 +151,7 @@ REST_FRAMEWORK = {
 
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=60*24*7), # 1 week
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=30),
     'ROTATE_REFRESH_TOKENS': False,
     'BLACKLIST_AFTER_ROTATION': True,
     'ALGORITHM': 'HS256',

@@ -11,3 +11,7 @@ server/type/__pycache__/
 server/type/migrations/__pycache__/
 server/type/utils/__pycache__/
 server/type/t5/
+server/assets/df_n1n5.tsv
+server/assets/df_n1plus.tsv
+server/assets/sparse_matrix_n1n5
+server/assets/sparse_matrix_n1plus

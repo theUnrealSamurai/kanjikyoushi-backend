@@ -1,63 +1,35 @@
 import re
-import random
-import pandas as pd
-from .utils import contains_kanji, contains_only_allowed_kanji, fetch_kanji_data
+from .utils import *
 
 
-df = pd.read_csv('assets/sentence_db.tsv', sep='\t')
+def fetch_practice_sentence(kanji: str, unknownkanji: str, maxrow: int):
+    index = search_max_kanji_match(sparse_matrix, sparse_matrix_kanji, kanji, unknownkanji, maxrow)
+    row = fetch_psql_row(index)
+    ichiran_data = get_ichiran_data(row[2])
+
+    return {
+        "japanese": row[2],
+        "english": translate(row[2]),
+        "romaji": ichiran_data.split("\n\n*")[0].strip(),
+        "kanji_data": fetch_kanji_data(re.findall(r'[\u4e00-\u9faf]', row[2])),
+        "definitions": ichiran_data.split("\n\n*")[1:],
+    }
 
 
 
-def fetch_learning_sentence(user_kanji_level: int, learning_kanji: str, learned_kanji: str):
-    global df
-    df = df[df['JLPT'] == "N" + str(user_kanji_level)] # Filter DataFrame by JLPT level
-
-    # Filter all the sentences containing the learning kanji
-    indexes_with_kanji = df[df['jp'].apply(lambda x: contains_kanji(x, learning_kanji))].index.tolist()
-
-    # Filter sentences containing only learned kanji + learning kanji
-    filtered_indexes = [index for index in indexes_with_kanji if contains_only_allowed_kanji(df.at[index, 'jp'], learning_kanji + learned_kanji)]
-
-
-    if filtered_indexes:
-        random_index = random.choice(filtered_indexes)
-        random_row = df.loc[random_index]
-
-        fetched_sentence = random_row['jp']
-        kanji_in_fetched_sentence = re.findall(r'[\u4e00-\u9faf]', fetched_sentence)
-        kanji_data = fetch_kanji_data(kanji_in_fetched_sentence)
-
-        return {
-            "japanese": random_row['jp'],
-            "english": random_row['en'],
-            "romaji": "this is a sample romaji sentence",
-            "kanji": kanji_data,
-            "vocabulary": [
-                {"日本語": ["Japanese", "Japanese Language"]},
-                {"日本": ["Japan"]},
-                {"語": ["Language"]},
-            ],
-        }
-    else:
-        raise Exception("No sentence found matching the criteria.")
+def fetch_revision_sentence(due_kanji, unknown_kanji, maxrow):
+    index = search_max_kanji_match(sparse_matrix, sparse_matrix_kanji, due_kanji, unknown_kanji, maxrow)
+    row = fetch_psql_row(index)
+    ichiran_data = get_ichiran_data(row[2])
     
+    if not contains_kanji(row[2], due_kanji):
+        return None
 
-def fetch_test_sentence(user_kanji_level: int, learned_kanji: str, test_kanji: str):
-    global df
-    df = df[df['JLPT'] == "N" + str(user_kanji_level)] # Filter DataFrame by JLPT level
-
-    # Filter all the sentences containing the testing kanji
-    indexes_with_kanji = df[df['jp'].apply(lambda x: contains_kanji(x, test_kanji))].index.tolist()
-
-    # Filter sentences containing only testable kanji + learning kanji
-    filtered_indexes = [index for index in indexes_with_kanji if contains_only_allowed_kanji(df.at[index, 'jp'], test_kanji + learned_kanji)]
-
-    if filtered_indexes:
-        random_index = random.choice(filtered_indexes)
-        random_row = df.loc[random_index]
-        return {
-            "japanese": random_row['jp'],
-            "english": random_row['en'],
-        }
-    else:
-        raise Exception("No sentence found matching the criteria.")
+    return {
+        "japanese": row[2],
+        "english": translate(row[2]), 
+        "romaji": ichiran_data.split("\n\n*")[0].strip(),
+        "kanji_data": fetch_kanji_data(re.findall(r'[\u4e00-\u9faf]', row[2])),
+        "definitions": ichiran_data.split("\n\n*")[1:],
+        "due_kanji": due_kanji,
+    }
