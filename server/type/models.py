@@ -1,9 +1,8 @@
-import re, random, json
+import re, json
 from django.db import models
 from django.contrib.auth.models import User
 from django.utils import timezone
 from fsrs import FSRS, Card, Rating 
-from rest_framework.response import Response
 from django.db.models import JSONField
 from .utils.fetch_sentence import fetch_practice_sentence, fetch_revision_sentence
 
@@ -63,6 +62,7 @@ class CoreDataProcessing(models.Model):
         self.learned_kanji = ""
         self.kanji_json = {}
         self.max_rows = 0
+        self.learned_kanji_counter = 0
 
         self.save()
         return self.known_kanji
@@ -74,18 +74,10 @@ class CoreDataProcessing(models.Model):
         if not self.upcomming_kanji:
             return {"redirect": "true", "url": "/congratulations/"}
         
-        # Logic to make sure the user always completes typing the first kanji 3 times before other kanjis 3 times. 
-        kanji_for_sentence = ""
-
-        while True:
-            kanji_for_sentence = random.choice(self.upcomming_kanji[:5])
-            if kanji_for_sentence == self.upcomming_kanji[0]:
-                break
-            if self.temp_char_type_counts.get(self.upcomming_kanji[0], 0) == self.learning_count-1 and self.temp_char_type_counts.get(kanji_for_sentence, 0) == self.learning_count-1:
-                continue
-            else:
-                break
-        response_json = fetch_practice_sentence(kanji_for_sentence)
+        # upcomming kanji is [5:] because it's the unknown kanji. And here the unknown kanji is known kanji + 5 more (learning)
+        # max_rows is +5000 because the max_rows is set to work for the revision not practice. 
+        kanji_for_sentence = self.upcomming_kanji[:5]
+        response_json = fetch_practice_sentence(kanji_for_sentence, self.upcomming_kanji[5:], self.max_rows+5000)
         response_json["learned_kanji"] = self.learned_kanji_counter
         return response_json
     
