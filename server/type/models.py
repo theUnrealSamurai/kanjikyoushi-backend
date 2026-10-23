@@ -1,164 +1,250 @@
-import re, json
-from django.db import models
+import random
+from collections import defaultdict
+
 from django.contrib.auth.models import User
+from django.db import models
 from django.utils import timezone
-from fsrs import FSRS, Card, Rating 
-from django.db.models import JSONField
-from .utils.fetch_sentence import fetch_practice_sentence, fetch_revision_sentence
+from fsrs import Card, Rating, Scheduler
+
+from .corpus import KANJI_RE, furigana, kanji_info, same_text
 
 
-f = FSRS()
-with open("assets/n1n5_kanji_row_end_index.json", 'r', encoding='utf-8') as file:
-    kanji_end_index = json.load(file)
+scheduler = Scheduler()
+
+DEFAULT_KNOWN_KANJI = "一二三四五六七八九十百千万"
+LEARNING_POOL = 5           # new words being warmed up at any one time
+WARMUP_SIGHTINGS = 3        # a new word is typed this many times (with furigana) before reviews start
+REVIEWS_PER_SENTENCE = 2    # at most this many due words are graded in one sentence
+DUE_TARGETS = 6             # how many of the most overdue words to look for sentences for
+CANDIDATES_PER_WORD = 200   # sentences sampled per target word when picking the next sentence
+RECENT_SENTENCES = 50       # don't repeat a sentence typed this recently
 
 
-class CoreDataProcessing(models.Model):
-    
-    user = models.OneToOneField(User, on_delete=models.CASCADE)
+class Word(models.Model):
+    """A word as written plus its reading, e.g. 食べる/たべる. This is the unit that gets learned and graded.
+    The reading is part of the identity because 方 (ほう) and 方 (かた) are different things to learn."""
 
-    known_kanji = models.TextField(max_length=10000, default="")
-    learned_kanji = models.TextField(max_length=10000, default="")
-    upcomming_kanji = models.TextField(max_length=10000, default="")
-    char_type_counts = JSONField(default=dict)
-    temp_char_type_counts = JSONField(default=dict)
+    text = models.CharField(max_length=64)
+    reading = models.CharField(max_length=128)
+    frequency = models.PositiveIntegerField(default=0, db_index=True)  # sentences using it; sets the learning order
 
-    learned_kanji_counter = models.IntegerField(default=0)
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["text", "reading"], name="unique_word")]
 
-    learning_count = models.IntegerField(default=3) # The revision for the kanji doesn't start until the user typed it for 3 times. 
-    max_rows = models.IntegerField(default=0)
+    def __str__(self):
+        return f"{self.text} ({self.reading})"
 
-    kanji_json = JSONField(default=dict)
 
+class Sentence(models.Model):
+    text = models.TextField(unique=True)
+    translation = models.TextField(blank=True)
+    romaji = models.TextField(blank=True)
+    tokens = models.JSONField()  # [[surface, reading, word_id or None], ...] in sentence order
+    words = models.ManyToManyField(Word, related_name="sentences")
+
+    def __str__(self):
+        return self.text
+
+
+class Learner(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="learner")
+    known_kanji = models.TextField(blank=True)  # kanji picked at onboarding; words made only of these are never taught
+    onboarded = models.BooleanField(default=False)
+    current = models.JSONField(default=dict, blank=True)  # the sentence on screen: {"sentence", "learning", "review"}
+    recent = models.JSONField(default=list, blank=True)   # ids of recently typed sentences
 
     def __str__(self):
         return self.user.username
 
 
     def onboard(self, kanji_list):
-        """Takes a list of kanji as a string and then stores in the known kanji field. Also sets up the other variables
-        This function is called only once when the user first creates an account, 
-        The spaced repetition will not be applied to these kanjis until the user makes a mistakes and picks to learn them. 
-        """
-        if not kanji_list:
-            kanji_list = "一二三四五六七八九十百千万"
-        else:
-            for kanji in "一二三四五六七八九十百千万":
-                if kanji not in kanji_list:
-                    kanji_list += kanji
-
-        self.known_kanji = kanji_list
-        with open("assets/jlpt_kanji_lists.json", 'r', encoding='utf-8') as file:
-            kanji_json = json.load(file)
-            kanjis = kanji_json["N5"] + kanji_json["N4"] + kanji_json["N3"] + kanji_json["N2"] + kanji_json["N1"]
-            self.upcomming_kanji = ''.join(kanjis)
-
-        # Making sure the user doesn't have to learn the kanjis that they know already
-        for kanji in self.known_kanji:
-            self.upcomming_kanji = self.upcomming_kanji.replace(kanji, "")
-
-        # reset to defaults
-        self.char_type_counts = {}
-        self.temp_char_type_counts = {}
-        self.learned_kanji = ""
-        self.kanji_json = {}
-        self.max_rows = 0
-        self.learned_kanji_counter = 0
-
-        self.save()
-        return self.known_kanji
-    
-
-    def render_practice(self):
-        "randomly render a sentence using the first 5 kanjis in the upcomming kanji list"
-
-        if not self.upcomming_kanji:
-            return {"redirect": "true", "url": "/congratulations/"}
-        
-        # upcomming kanji is [5:] because it's the unknown kanji. And here the unknown kanji is known kanji + 5 more (learning)
-        # max_rows is +5000 because the max_rows is set to work for the revision not practice. 
-        kanji_for_sentence = self.upcomming_kanji[:5]
-        response_json = fetch_practice_sentence(kanji_for_sentence, self.upcomming_kanji[5:], self.max_rows+5000)
-        response_json["learned_kanji"] = self.learned_kanji_counter
-        return response_json
-    
-
-    def update_practice(self, sentence):
-        """Take the sentence that user typed, update the main character count for the character, 
-        update the temprorary character count for the character, in the end if the temp character 
-        count is greater than self.learning_count, then move the character to the learned kanji list. 
-        Only the characters that are in the upcomming kanji list. """
-
-        kanjis_in_sentence = re.findall(r'[\u4e00-\u9faf]', sentence)
-
-        # Update character counts:
-        for kanji in kanjis_in_sentence:
-            self.char_type_counts[kanji] = self.char_type_counts.get(kanji, 0) + 1
-            if kanji in self.upcomming_kanji:
-                self.temp_char_type_counts[kanji] = self.temp_char_type_counts.get(kanji, 0) + 1
-
-        # Move the kanji to learned kanji and erase data from the temp count for a fresh restart if the user forgets the kanji. 
-        kanji_to_remove, set_max_rows = [], False
-        for kanji, count in self.temp_char_type_counts.items():
-            if count >= self.learning_count:
-                self.learned_kanji_counter += 1
-                self.learned_kanji += kanji
-                self.upcomming_kanji = self.upcomming_kanji.replace(kanji, "")
-                kanji_to_remove.append(kanji)
-                # create a card for the kanji and then add it to the json 
-                card = Card()
-                card, _ = f.review_card(card, Rating.Good)
-                self.kanji_json[kanji] = card.to_dict()
-                set_max_rows = True
-
-        # Remove processed kanji from temp_char_type_counts
-        for kanji in kanji_to_remove:
-            self.temp_char_type_counts.pop(kanji, None)
-
-        # If len of self.upcomming_kanji is 0, then redirect to a different page saying Congratulations.
-        if not self.upcomming_kanji:
-            return {"redirect": "true", "url": "/congratulations/"}
-
-        if set_max_rows:
-            self.max_rows = kanji_end_index[self.learned_kanji[-1]]
-
+        """Store the kanji the user can already read and start their progress from scratch.
+        Every word written only with those kanji is marked known, so it is never taught or graded."""
+        known = "".join(dict.fromkeys(KANJI_RE.findall((kanji_list or "") + DEFAULT_KNOWN_KANJI)))
+        self.words.all().delete()
+        self.known_kanji = known
+        self.onboarded = True
+        self.current, self.recent = {}, []
         self.save()
 
+        known_set = set(known)
+        UserWord.objects.bulk_create(
+            [
+                UserWord(learner=self, word_id=word_id, status=UserWord.KNOWN)
+                for word_id, text in Word.objects.values_list("id", "text").iterator()
+                if set(KANJI_RE.findall(text)) <= known_set
+            ],
+            batch_size=1000,
+        )
 
-    def render_revision(self):
+
+    def stats(self):
         now = timezone.now()
-        due_cards = []
-        for kanji, card_json in self.kanji_json.items():
-            card = Card.from_dict(card_json)
-            if card.due <= now:
-                due_cards.append((kanji, card.due))
-        
-        if not due_cards:
-            return None
-        
-        due_kanjis = [kanji for kanji, _ in due_cards]
-        response_json = fetch_revision_sentence(due_kanjis, self.upcomming_kanji, self.max_rows)
-        if not response_json:
-            return None
-        return response_json
-
-
-    def update_revision(self, kanji_rating_dict):
-        user_rating = {
-            "easy": Rating.Easy,
-            "good": Rating.Good,
-            "hard": Rating.Hard,
-            "again": Rating.Again,
+        return {
+            "learned": self.words.filter(status=UserWord.REVIEW).count(),
+            "due": self.words.filter(status=UserWord.REVIEW, due__lte=now).count(),
+            "learning": self.words.filter(status=UserWord.LEARNING).count(),
         }
-        for kanji, rating in kanji_rating_dict.items():
-            self.char_type_counts[kanji] = self.char_type_counts.get(kanji, 0) + 1
-            if kanji in self.known_kanji and rating == "easy":
-                continue
-            if kanji in self.kanji_json:
-                card = Card.from_dict(self.kanji_json[kanji])
-            else: 
-                card = Card()
-                self.learned_kanji += kanji
-                self.known_kanji = self.known_kanji.replace(kanji, "")
-            card, _ = f.review_card(card, user_rating[rating])
-            self.kanji_json[kanji] = card.to_dict()
-        self.save()
+
+
+    def next_sentence(self):
+        """Pick the next sentence to type and remember which of its words will be graded.
+
+        Due review words come first (most overdue first), then the new words being warmed up.
+        The best sentence covers the most of those while containing as few never-seen words as possible.
+        A sentence that is already on screen and not yet submitted is returned again, so reloading
+        the page doesn't skip it. Returns None when there is nothing left to learn or review.
+        """
+        pending = Sentence.objects.filter(id=self.current.get("sentence")).first() if self.current else None
+        if pending:
+            return self.sentence_payload(pending, dict(self.words.values_list("word_id", "status")))
+
+        self._fill_learning_pool()
+        due = list(
+            self.words.filter(status=UserWord.REVIEW, due__lte=timezone.now(), word__frequency__gt=0)
+            .order_by("due").values_list("word_id", flat=True)[:DUE_TARGETS]
+        )
+        learning = list(self.words.filter(status=UserWord.LEARNING).values_list("word_id", flat=True))
+        if not due and not learning:
+            return None
+
+        through = Sentence.words.through
+        candidates = set()
+        for word_id in due + learning:
+            ids = list(through.objects.filter(word_id=word_id).values_list("sentence_id", flat=True)[:5000])
+            candidates.update(random.sample(ids, min(len(ids), CANDIDATES_PER_WORD)))
+
+        words_in = defaultdict(set)
+        for sentence_id, word_id in through.objects.filter(sentence_id__in=candidates).values_list("sentence_id", "word_id"):
+            words_in[sentence_id].add(word_id)
+        statuses = dict(self.words.values_list("word_id", "status"))
+        recent = set(self.recent)
+
+        best, best_score = None, None
+        for sentence_id in random.sample(sorted(candidates), len(candidates)):
+            words = words_in[sentence_id]
+            due_hits = [w for w in due if w in words][:REVIEWS_PER_SENTENCE]
+            learning_hits = [w for w in learning if w in words]
+            unseen = sum(1 for w in words if w not in statuses)
+            score = 3 * len(due_hits) + 2 * min(len(learning_hits), 2) - 2 * unseen - 5 * (sentence_id in recent)
+            if best_score is None or score > best_score:
+                best, best_score = (sentence_id, due_hits, learning_hits), score
+
+        sentence_id, review, learning = best
+        self.current = {"sentence": sentence_id, "review": review, "learning": learning}
+        self.save(update_fields=["current"])
+        return self.sentence_payload(Sentence.objects.get(id=sentence_id), statuses)
+
+
+    def sentence_payload(self, sentence, statuses):
+        """The sentence as the typing page needs it: tokens with furigana and the role of each word.
+        Roles: "review" (graded, furigana hidden until Tab), "learning" (new word, furigana shown),
+        "unseen" (not taught yet, furigana shown), "known" (furigana hidden), None (kana/punctuation)."""
+        review, learning = set(self.current["review"]), set(self.current["learning"])
+
+        def role(word_id):
+            if word_id is None:
+                return None
+            if word_id in review:
+                return "review"
+            if word_id in learning:
+                return "learning"
+            return "unseen" if word_id not in statuses else "known"
+
+        tokens = [
+            {"text": surface, "word": word_id, "role": role(word_id), "ruby": furigana(surface, reading)}
+            for surface, reading, word_id in sentence.tokens
+        ]
+        # Kanji cards only for new words: their readings would give away the answer for review words.
+        new_words = "".join(t["text"] for t in tokens if t["role"] == "learning")
+        return {
+            "sentence_id": sentence.id,
+            "text": sentence.text,
+            "translation": sentence.translation,
+            "romaji": sentence.romaji,
+            "tokens": tokens,
+            "kanji": kanji_info(new_words),
+            "stats": self.stats(),
+        }
+
+
+    def submit(self, sentence_id, typed, revealed=(), missed=()):
+        """Grade the sentence that was just typed.
+
+        Review words: typed wrong -> Again, reading revealed (Tab or help mode) -> Hard, typed clean -> Good.
+        New words: count one more sighting; after WARMUP_SIGHTINGS they get an FSRS card and start reviews.
+        """
+        sentence = Sentence.objects.filter(id=sentence_id).first()
+        if sentence is None or self.current.get("sentence") != sentence_id:
+            raise ValueError("That is not the sentence currently being typed.")
+        if not same_text(typed, sentence.text):
+            raise ValueError("The typed sentence doesn't match.")
+
+        now, revealed, missed = timezone.now(), set(revealed), set(missed)
+        graded = list(self.words.filter(word_id__in=self.current["review"] + self.current["learning"]))
+        for user_word in graded:
+            if user_word.word_id in self.current["review"]:
+                if user_word.word_id in missed:
+                    rating = Rating.Again
+                elif user_word.word_id in revealed:
+                    rating = Rating.Hard
+                else:
+                    rating = Rating.Good
+                user_word.review(rating, now)
+            else:
+                user_word.sightings += 1
+                if user_word.sightings >= WARMUP_SIGHTINGS:
+                    user_word.status = UserWord.REVIEW
+                    user_word.review(Rating.Good, now)
+        UserWord.objects.bulk_update(graded, ["status", "sightings", "card", "due"])
+
+        self.recent = (self.recent + [sentence_id])[-RECENT_SENTENCES:]
+        self.current = {}
+        self.save(update_fields=["recent", "current"])
+
+
+    def _fill_learning_pool(self):
+        """Top the learning pool up with the most frequent words the user hasn't met yet.
+        Words added to the corpus after onboarding are checked against the known kanji here."""
+        missing = LEARNING_POOL - self.words.filter(status=UserWord.LEARNING).count()
+        if missing <= 0:
+            return
+
+        known_set = set(self.known_kanji)
+        new_rows = []
+        unmet = (
+            Word.objects.filter(frequency__gt=0)
+            .exclude(id__in=UserWord.objects.filter(learner=self).values("word_id"))
+            .order_by("-frequency", "id").values_list("id", "text")
+        )
+        for word_id, text in unmet.iterator():
+            known = set(KANJI_RE.findall(text)) <= known_set
+            new_rows.append(UserWord(learner=self, word_id=word_id, status=UserWord.KNOWN if known else UserWord.LEARNING))
+            missing -= not known
+            if missing == 0:
+                break
+        UserWord.objects.bulk_create(new_rows, batch_size=1000, ignore_conflicts=True)  # two requests at once may add the same words
+
+
+class UserWord(models.Model):
+    KNOWN, LEARNING, REVIEW = "known", "learning", "review"
+    STATUSES = [(KNOWN, "Known"), (LEARNING, "Learning"), (REVIEW, "Review")]
+
+    learner = models.ForeignKey(Learner, on_delete=models.CASCADE, related_name="words")
+    word = models.ForeignKey(Word, on_delete=models.CASCADE, related_name="+")
+    status = models.CharField(max_length=8, choices=STATUSES)
+    sightings = models.PositiveSmallIntegerField(default=0)  # times typed while learning
+    card = models.JSONField(null=True, blank=True)           # FSRS card, once reviews start
+    due = models.DateTimeField(null=True, blank=True)         # copy of card.due so due words can be queried
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["learner", "word"], name="unique_learner_word")]
+        indexes = [models.Index(fields=["learner", "status", "due"])]
+
+    def __str__(self):
+        return f"{self.learner} · {self.word} · {self.status}"
+
+    def review(self, rating, now):
+        card = Card.from_dict(self.card) if self.card else Card()
+        card, _ = scheduler.review_card(card, rating, now)
+        self.card, self.due = card.to_dict(), card.due
