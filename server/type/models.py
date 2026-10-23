@@ -26,7 +26,8 @@ class Word(models.Model):
 
     text = models.CharField(max_length=64)
     reading = models.CharField(max_length=128)
-    frequency = models.PositiveIntegerField(default=0, db_index=True)  # sentences using it; sets the learning order
+    frequency = models.PositiveIntegerField(default=0, db_index=True)  # sentences using it; orders words within a level
+    jlpt = models.PositiveSmallIntegerField(default=0)  # hardest kanji: 5 = N5 ... 1 = N1, 0 = beyond; sets the learning order
     meanings = models.JSONField(default=list, blank=True)  # English, one string per sense (up to 3), from JMdict
 
     class Meta:
@@ -252,7 +253,8 @@ class Learner(models.Model):
 
 
     def _fill_learning_pool(self):
-        """Top the learning pool up with the most frequent words the user hasn't met yet.
+        """Top the learning pool up with the next words the user hasn't met yet, in JLPT order: every N5 word
+        before any N4 word and so on, most frequent first within a level.
         Words added to the corpus after onboarding are checked against the known kanji here."""
         missing = LEARNING_POOL - self.words.filter(status=UserWord.LEARNING).count()
         if missing <= 0:
@@ -263,7 +265,7 @@ class Learner(models.Model):
         unmet = (
             Word.objects.filter(frequency__gt=0)
             .exclude(id__in=UserWord.objects.filter(learner=self).values("word_id"))
-            .order_by("-frequency", "id").values_list("id", "text")
+            .order_by("-jlpt", "-frequency", "id").values_list("id", "text")
         )
         for word_id, text in unmet.iterator():
             known = set(KANJI_RE.findall(text)) <= known_set

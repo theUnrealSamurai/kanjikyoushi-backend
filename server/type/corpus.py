@@ -156,6 +156,22 @@ def is_joyo_only(text):
     return all(kanji in joyo for kanji in KANJI_RE.findall(text))
 
 
+@lru_cache(maxsize=1)
+def jlpt_kanji():
+    """Kanji -> JLPT level (5 = N5 ... 1 = N1), from the same lists as the frontend's onboarding page.
+    kanji_data.json's own "jlpt" is the old four-level test, so it can't say N5 from N4."""
+    with open(settings.ASSETS_DIR / "jlpt_kanji.json", encoding="utf-8") as file:
+        lists = json.load(file)
+    return {kanji: level for level in range(1, 6) for kanji in lists[f"N{level}"]}
+
+
+def jlpt_level(text):
+    """A word is as hard as its hardest kanji: 食べる is N5, 部屋 is N3. 0 means beyond N1.
+    々 〆 ヶ aren't kanji to learn, so they don't count."""
+    levels = jlpt_kanji()
+    return min((levels.get(kanji, 0) for kanji in KANJI_RE.findall(text) if kanji not in "々〆ヶ"), default=0)
+
+
 def kanji_info(text):
     """On/kun readings and meanings for each kanji in the text, for the kanji cards."""
     data = kanji_dictionary()

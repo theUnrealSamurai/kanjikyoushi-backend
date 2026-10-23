@@ -8,7 +8,7 @@ from django.db import transaction
 from django.db.models import Count, OuterRef, Subquery
 from django.db.models.functions import Coalesce
 
-from type.corpus import is_joyo_only, katakana_count, romaji, tokenize
+from type.corpus import is_joyo_only, jlpt_level, katakana_count, romaji, tokenize
 from type.dictionary import cached_dictionary, fill_meanings
 from type.models import KanaWord, Sentence, Word
 
@@ -128,7 +128,7 @@ class Command(BaseCommand):
             rows.append((text, translation, tokens))
 
         new_words = {(t.word, t.word_reading) for _, _, tokens in rows for t in tokens if t.word} - word_ids.keys()
-        Word.objects.bulk_create([Word(text=text, reading=reading) for text, reading in new_words])
+        Word.objects.bulk_create([Word(text=text, reading=reading, jlpt=jlpt_level(text)) for text, reading in new_words])
         if new_words:
             for id, text, reading in Word.objects.filter(text__in={text for text, _ in new_words}).values_list("id", "text", "reading"):
                 word_ids[(text, reading)] = id

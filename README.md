@@ -13,7 +13,8 @@ The frontend lives in [kanjikyoushi-frontend](https://github.com/theUnrealSamura
   [JMdict](https://github.com/scriptin/jmdict-simplified), matching on text and reading.
 - **The unit is the word**, keyed by text and reading (方/ほう and 方/かた are different words). Names
   and numbers get furigana but are never graded.
-- **Learning.** New words are taken in corpus-frequency order, five at a time. Each is typed 3 times with
+- **Learning.** New words are taken in JLPT order (N5 first; a word is as hard as its hardest kanji), most
+  frequent first within a level, five at a time. Each is typed 3 times with
   furigana showing, then gets an [FSRS](https://github.com/open-spaced-repetition/py-fsrs) card.
 - **Reviews happen while typing.** Each sentence grades up to 2 due words, with their furigana hidden:
   - typed without help → Good

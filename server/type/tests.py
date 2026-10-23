@@ -12,7 +12,7 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from .corpus import furigana, is_joyo_only, same_text, tokenize
+from .corpus import furigana, is_joyo_only, jlpt_level, same_text, tokenize
 from .dictionary import cached_dictionary, find_kana_meanings, find_meanings, index_by_kana, index_by_kanji
 from .models import WARMUP_SIGHTINGS, KanaWord, Learner, Sentence, UserWord, Word
 
@@ -111,6 +111,13 @@ class CorpusTests(TestCase):
         self.assertTrue(same_text("４ドル", "4ドル"))
         self.assertFalse(same_text("今日は飴です。", "今日は雨です。"))
 
+    def test_jlpt_level_is_the_hardest_kanji(self):
+        self.assertEqual(jlpt_level("食べる"), 5)
+        self.assertEqual(jlpt_level("部屋"), 3)  # 屋 is N4 but 部 is N3
+        self.assertEqual(jlpt_level("剣"), 1)
+        self.assertEqual(jlpt_level("侏儒"), 0)  # beyond N1
+        self.assertEqual(jlpt_level("人々"), 5)  # 々 isn't a kanji to learn
+
     def test_build_corpus_loads_sentences_and_counts_words(self):
         rows = ["index\ttext\ttranslation"] + [f"{i}\t{text}\tEnglish {i}" for i, text in enumerate(SENTENCES)]
         with tempfile.TemporaryDirectory() as folder:
@@ -119,6 +126,7 @@ class CorpusTests(TestCase):
         self.assertEqual(Sentence.objects.count(), 6)  # テントが一つしかない has nothing to learn
         self.assertEqual(Sentence.objects.get(text="今日は雨です。").translation, "English 2")
         self.assertEqual(Word.objects.get(text="先生").frequency, 3)
+        self.assertEqual(Word.objects.get(text="先生").jlpt, 5)
 
 
 @NO_DICTIONARY
@@ -268,6 +276,20 @@ class LearningFlowTests(TestCase):
     def test_known_kanji_words_are_never_taught(self):
         learner = self.onboard("雨")
         self.assertEqual(learner.words.get(word__text="雨").status, UserWord.KNOWN)
+
+    def test_new_words_come_in_jlpt_order_then_by_frequency(self):
+        learner = self.onboard()
+        learner.words.all().delete()
+        Word.objects.update(frequency=0)  # leave only the words below in play
+        for text, reading, jlpt, frequency in [
+            ("剣", "けん", 1, 900), ("魔物", "まもの", 1, 800), ("侏儒", "しゅじゅ", 0, 999),
+            ("部屋", "へや", 3, 50), ("頭", "あたま", 3, 70), ("持つ", "もつ", 4, 20), ("犬", "いぬ", 5, 10),
+        ]:
+            Word.objects.create(text=text, reading=reading, jlpt=jlpt, frequency=frequency)
+
+        learner._fill_learning_pool()
+        pool = set(learner.words.filter(status=UserWord.LEARNING).values_list("word__text", flat=True))
+        self.assertEqual(pool, {"犬", "持つ", "頭", "部屋", "剣"})  # 剣 beats 魔物 on frequency; 侏儒 comes last
 
     def test_new_words_warm_up_then_get_reviewed(self):
         self.onboard()
