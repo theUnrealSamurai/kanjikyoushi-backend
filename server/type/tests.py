@@ -283,7 +283,7 @@ class LearningFlowTests(TestCase):
         learner = Learner.objects.get(user=self.user)
         self.assertTrue(learner.words.filter(status=UserWord.REVIEW, sightings__gte=WARMUP_SIGHTINGS).exists())
 
-    def test_review_ratings_come_from_tab_and_mistakes(self):
+    def test_review_ratings_come_from_tab_only_never_typos(self):
         learner = self.onboard()
         learner.words.all().delete()
         past = timezone.now() - timedelta(days=1)
@@ -301,9 +301,9 @@ class LearningFlowTests(TestCase):
         self.assertEqual(sorted(self.word_ids(payload, "review")), sorted([teacher.id, meeting.id]))
         self.assertEqual(set(payload["words"]), {str(t["word"]) for t in payload["tokens"] if t["word"]})
 
-        self.assertEqual(self.submit(payload, revealed=[teacher.id], missed=[meeting.id]).status_code, 200)
+        self.assertEqual(self.submit(payload, revealed=[teacher.id], missed=[meeting.id]).status_code, 200)  # missed: ignored
         cards = {w.word_id: w.card for w in learner.words.filter(status=UserWord.REVIEW)}
-        self.assertGreater(cards[teacher.id]["stability"], cards[meeting.id]["stability"])  # Hard beats Again
+        self.assertGreater(cards[meeting.id]["stability"], cards[teacher.id]["stability"])  # typo ignored: Good beats Hard
 
     def test_payload_has_dictionary_data_for_learning_and_review_words(self):
         learner = self.onboard()
@@ -352,7 +352,7 @@ class LearningFlowTests(TestCase):
         self.assertEqual(sorted(self.word_ids(payload, "review")), sorted([teacher.id, meeting.id]))
 
         # Asked how to type both (and typed one wrong); revealed the reading of one of them first.
-        response = self.submit(payload, skipped=[teacher.id, meeting.id], missed=[teacher.id], revealed=[meeting.id])
+        response = self.submit(payload, skipped=[teacher.id, meeting.id], revealed=[meeting.id])
         self.assertEqual(response.status_code, 200)
         skipped = learner.words.get(word=teacher)
         self.assertIsNone(skipped.card)  # untouched: no FSRS review at all

@@ -206,10 +206,10 @@ class Learner(models.Model):
         }
 
 
-    def submit(self, sentence_id, typed, revealed=(), missed=(), skipped=()):
-        """Grade the sentence that was just typed.
+    def submit(self, sentence_id, typed, revealed=(), skipped=()):
+        """Grade the sentence that was just typed. Typos never count: only whether you needed the reading.
 
-        Review words: typed wrong -> Again, reading revealed (Tab or help mode) -> Hard, typed clean -> Good.
+        Review words: reading revealed (Tab or help mode) -> Hard, otherwise -> Good.
         Skipped review words (you asked how to type them: you know the reading, not the keystrokes) aren't
         graded at all and stay due, unless you had also revealed the reading.
         New words: count one more sighting; after WARMUP_SIGHTINGS they get an FSRS card and start reviews.
@@ -222,19 +222,13 @@ class Learner(models.Model):
         if not same_text(typed, sentence.text):
             raise ValueError("The typed sentence doesn't match.")
 
-        now, revealed, missed, skipped = timezone.now(), set(revealed), set(missed), set(skipped)
+        now, revealed, skipped = timezone.now(), set(revealed), set(skipped)
         graded = list(self.words.filter(word_id__in=self.current["review"] + self.current["learning"]))
         for user_word in graded:
             if user_word.word_id in self.current["review"]:
                 if user_word.word_id in skipped and user_word.word_id not in revealed:
                     continue
-                if user_word.word_id in missed:
-                    rating = Rating.Again
-                elif user_word.word_id in revealed:
-                    rating = Rating.Hard
-                else:
-                    rating = Rating.Good
-                user_word.review(rating, now)
+                user_word.review(Rating.Hard if user_word.word_id in revealed else Rating.Good, now)
             else:
                 user_word.sightings += 1
                 if user_word.sightings >= WARMUP_SIGHTINGS:
