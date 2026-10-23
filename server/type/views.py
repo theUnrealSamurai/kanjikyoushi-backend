@@ -11,6 +11,7 @@ class SubmitSerializer(serializers.Serializer):
     typed = serializers.CharField(trim_whitespace=False)
     revealed = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
     missed = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
+    skipped = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
 
 
 def get_learner(user):
@@ -57,7 +58,7 @@ def submit(request):
 
     data, learner = serializer.validated_data, get_learner(request.user)
     try:
-        learner.submit(data["sentence_id"], data["typed"], data["revealed"], data["missed"])
+        learner.submit(data["sentence_id"], data["typed"], data["revealed"], data["missed"], data["skipped"])
     except ValueError as error:
         return Response({"error": str(error)}, status=400)
     return next_sentence_response(learner)

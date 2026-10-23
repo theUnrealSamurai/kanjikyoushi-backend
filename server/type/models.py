@@ -206,10 +206,12 @@ class Learner(models.Model):
         }
 
 
-    def submit(self, sentence_id, typed, revealed=(), missed=()):
+    def submit(self, sentence_id, typed, revealed=(), missed=(), skipped=()):
         """Grade the sentence that was just typed.
 
         Review words: typed wrong -> Again, reading revealed (Tab or help mode) -> Hard, typed clean -> Good.
+        Skipped review words (you asked how to type them: you know the reading, not the keystrokes) aren't
+        graded at all and stay due, unless you had also revealed the reading.
         New words: count one more sighting; after WARMUP_SIGHTINGS they get an FSRS card and start reviews.
         Words you were assumed to know but looked up with Tab: a known word goes back to the warm-up
         (furigana shown again), a learned word that wasn't due is reviewed as Hard.
@@ -220,10 +222,12 @@ class Learner(models.Model):
         if not same_text(typed, sentence.text):
             raise ValueError("The typed sentence doesn't match.")
 
-        now, revealed, missed = timezone.now(), set(revealed), set(missed)
+        now, revealed, missed, skipped = timezone.now(), set(revealed), set(missed), set(skipped)
         graded = list(self.words.filter(word_id__in=self.current["review"] + self.current["learning"]))
         for user_word in graded:
             if user_word.word_id in self.current["review"]:
+                if user_word.word_id in skipped and user_word.word_id not in revealed:
+                    continue
                 if user_word.word_id in missed:
                     rating = Rating.Again
                 elif user_word.word_id in revealed:

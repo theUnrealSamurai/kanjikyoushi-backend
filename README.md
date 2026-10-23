@@ -94,7 +94,7 @@ All `/type/*` endpoints need `Authorization: Bearer <access token>`.
 | `POST /home/login` | `username` (or email), `password` | tokens + user |
 | `POST /type/onboard` | `kanji_list`: string of kanji already known | resets progress |
 | `POST /type/next` | none | the next sentence (`409` until onboarded) |
-| `POST /type/submit` | `sentence_id`, `typed`, `revealed` (word ids whose furigana was shown), `missed` (word ids typed wrong) | grades it and returns the next sentence |
+| `POST /type/submit` | `sentence_id`, `typed`, `revealed` (word ids whose furigana was shown), `missed` (word ids typed wrong), `skipped` (word ids you asked how to type: not graded) | grades it and returns the next sentence |
 
 A sentence comes back as tokens. Each token has its `ruby` (furigana pairs) and a `role`:
 `review` (graded, furigana hidden), `learning` (new, furigana shown), `unseen` (not taught yet, furigana

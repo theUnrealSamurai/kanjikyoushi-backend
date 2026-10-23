@@ -337,6 +337,28 @@ class LearningFlowTests(TestCase):
             set(payload), {"sentence_id", "text", "translation", "romaji", "tokens", "words", "kana_words", "stats"}
         )
 
+    def test_skipped_review_words_are_not_graded(self):
+        learner = self.onboard()
+        learner.words.all().delete()
+        past = timezone.now() - timedelta(days=1)
+        teacher, meeting = Word.objects.get(text="先生"), Word.objects.get(text="会議")
+        for word in (teacher, meeting):
+            UserWord.objects.create(learner=learner, word=word, status=UserWord.REVIEW, due=past)
+        UserWord.objects.bulk_create([
+            UserWord(learner=learner, word=word, status=UserWord.KNOWN)
+            for word in Word.objects.exclude(id__in=(teacher.id, meeting.id))
+        ])
+        payload = self.next()
+        self.assertEqual(sorted(self.word_ids(payload, "review")), sorted([teacher.id, meeting.id]))
+
+        # Asked how to type both (and typed one wrong); revealed the reading of one of them first.
+        response = self.submit(payload, skipped=[teacher.id, meeting.id], missed=[teacher.id], revealed=[meeting.id])
+        self.assertEqual(response.status_code, 200)
+        skipped = learner.words.get(word=teacher)
+        self.assertIsNone(skipped.card)  # untouched: no FSRS review at all
+        self.assertEqual(skipped.due, past)  # still due, so it comes back
+        self.assertIsNotNone(learner.words.get(word=meeting).card)  # revealed first: Hard stands
+
     def test_looking_up_a_word_you_were_assumed_to_know(self):
         learner = self.onboard()
         learner.words.all().delete()
