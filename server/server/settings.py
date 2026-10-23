@@ -14,6 +14,7 @@ from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 ASSETS_DIR = BASE_DIR / "assets"
+DATA_DIR = BASE_DIR.parent / "data"  # downloaded files (the JMdict dictionary); gitignored
 
 
 def env_list(name, default):

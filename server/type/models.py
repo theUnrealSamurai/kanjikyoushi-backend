@@ -27,6 +27,7 @@ class Word(models.Model):
     text = models.CharField(max_length=64)
     reading = models.CharField(max_length=128)
     frequency = models.PositiveIntegerField(default=0, db_index=True)  # sentences using it; sets the learning order
+    meanings = models.JSONField(default=list, blank=True)  # English, one string per sense (up to 3), from JMdict
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["text", "reading"], name="unique_word")]
@@ -155,15 +156,24 @@ class Learner(models.Model):
             {"text": surface, "word": word_id, "role": role(word_id), "ruby": furigana(surface, reading)}
             for surface, reading, word_id in sentence.tokens
         ]
-        # Kanji cards only for new words: their readings would give away the answer for review words.
-        new_words = "".join(t["text"] for t in tokens if t["role"] == "learning")
+        # Every graded word, so the page can show its meaning; the keys are word ids as strings (JSON object keys).
+        graded = {t["word"] for t in tokens if t["role"] in ("review", "learning")}
+        words = {
+            str(word.id): {
+                "text": word.text,
+                "reading": word.reading,
+                "meanings": word.meanings,
+                "kanji": kanji_info(word.text),
+            }
+            for word in Word.objects.filter(id__in=graded)
+        }
         return {
             "sentence_id": sentence.id,
             "text": sentence.text,
             "translation": sentence.translation,
             "romaji": sentence.romaji,
             "tokens": tokens,
-            "kanji": kanji_info(new_words),
+            "words": words,
             "stats": self.stats(),
         }
 

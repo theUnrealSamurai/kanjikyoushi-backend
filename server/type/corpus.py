@@ -118,6 +118,20 @@ def kanji_dictionary():
         return json.load(file)
 
 
+@lru_cache(maxsize=1)
+def joyo_kanji():
+    """The jōyō kanji: school grades 1-6 and 8 (secondary school) in kanji_data.json. Grade 9/10 (jinmeiyō)
+    and kanji with no grade are not. 々 〆 ヶ count as kanji here but aren't characters to learn."""
+    return frozenset(
+        kanji for kanji, info in kanji_dictionary().items() if info.get("grade") in (1, 2, 3, 4, 5, 6, 8)
+    ) | frozenset("々〆ヶ")
+
+
+def is_joyo_only(text):
+    joyo = joyo_kanji()
+    return all(kanji in joyo for kanji in KANJI_RE.findall(text))
+
+
 def kanji_info(text):
     """On/kun readings and meanings for each kanji in the text, for the kanji cards."""
     data = kanji_dictionary()

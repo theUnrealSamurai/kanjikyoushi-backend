@@ -9,6 +9,8 @@ The frontend lives in [kanjikyoushi-frontend](https://github.com/theUnrealSamura
   (MeCab + UniDic). Each word gets its reading for furigana and its dictionary form (食べ → 食べる);
   [cutlet](https://github.com/polm/cutlet) adds romaji. This runs once, offline, at roughly a few thousand
   sentences a second. Nothing heavy happens per request.
+- **Meanings.** `load_dictionary` fills each word's English meanings (up to 3 senses) from
+  [JMdict](https://github.com/scriptin/jmdict-simplified), matching on text and reading.
 - **The unit is the word**, keyed by text and reading (方/ほう and 方/かた are different words). Names
   and numbers get furigana but are never graded.
 - **Learning.** New words are taken in corpus-frequency order, five at a time. Each is typed 3 times with
@@ -30,13 +32,44 @@ uv sync
 cd server
 uv run python manage.py migrate
 uv run python manage.py build_corpus assets/sample_sentences.txt   # 2.4k-sentence sample
+uv run python manage.py load_dictionary                            # English meanings (downloads JMdict once)
 uv run python manage.py runserver
 ```
 
 `build_corpus` takes a `.txt` file (one sentence per line) or a `.tsv`/`.csv` with a header row and a
 `text` column, plus an optional `translation` column. The old `df_n1n5.tsv` exports load as they are.
 Run it again to append more sentences; add `--replace` to swap out the corpus without losing learners'
-progress. See `--help` for the other options.
+progress. If the dictionary is already in `data/`, new words get their meanings too; otherwise it
+prints a reminder to run `load_dictionary`.
+
+### Filtering a big corpus
+
+The file is streamed row by row, never loaded whole, so a multi-gigabyte table is fine. These options
+skip rows before they are tokenized:
+
+| Option | |
+|---|---|
+| `--min-length N`, `--max-length N` | sentence length in characters (defaults 1 and 60) |
+| `--min-score X`, `--score-column COL` | skip rows scoring below X or with no valid score (column defaults to `score_ev_20230516`) |
+| `--sample FRACTION`, `--seed N` | keep each passing row with this probability (seeded, default seed 0) |
+| `--joyo-only` | skip sentences with any kanji outside the jōyō list (school grades 1–6 and 8) |
+| `--limit N` | stop after loading N sentences |
+
+Rows in the Massif `fragment_table.tsv` are in novel order, so `--limit` alone would only take the first few
+novels; `--sample` spreads the loaded sentences over the whole file. A reasonable ~1M-sentence subset
+(of the 30.4M rows, about 6.3M are 6-40 characters, score 1.46 or more and use only jōyō kanji, so
+sampling 15% gives roughly 950k; the `--limit` is a safety cap that would otherwise cut the sample off
+at the end of the file):
+
+```bash
+uv run python manage.py build_corpus ../../data/massif/fragment_table.tsv \
+    --min-length 6 --max-length 40 --min-score 1.46 --joyo-only --sample 0.15 --limit 1000000
+uv run python manage.py load_dictionary   # if you haven't yet; meanings for the new words
+```
+
+`load_dictionary` downloads the latest full English `jmdict-eng-*.json.zip` from jmdict-simplified into
+`data/` (gitignored) the first time; `--file PATH` uses a local `.json` or `.json.zip` instead. It
+prints how many words got meanings.
 
 ## Configuration
 
@@ -66,6 +99,20 @@ All `/type/*` endpoints need `Authorization: Bearer <access token>`.
 A sentence comes back as tokens. Each token has its `ruby` (furigana pairs) and a `role`:
 `review` (graded, furigana hidden), `learning` (new, furigana shown), `unseen` (not taught yet, furigana
 shown), `known`, or `null` for kana and punctuation.
+
+The sentence also has a `words` object with the dictionary data for every `learning` and `review` word,
+keyed by word id (as a string, the same id as `token.word`):
+
+```json
+"words": {
+  "42": {
+    "text": "男", "reading": "おとこ", "meanings": ["man; male", "fellow; guy; chap; bloke"],
+    "kanji": [{"kanji": "男", "on_readings": ["ダン", "ナン"], "kun_readings": ["おとこ"], "meanings": ["male", "man"]}]
+  }
+}
+```
+
+`meanings` is one string per sense (empty until `load_dictionary` has run).
 
 ## Tests
 
