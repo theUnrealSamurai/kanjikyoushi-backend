@@ -151,6 +151,12 @@ class FilterTests(TestCase):
         Sentence.objects.all().delete()
         self.assertNotEqual(self.load(rows, sample=0.3, seed=8), first)
 
+    def test_max_katakana_skips_names_and_loanwords(self):
+        rows = [("先生が来た。", 1), ("アリスが来た。", 1), ("ラーメンの先生。", 1), ("一ヶ月の先生。", 1)]
+        self.assertEqual(self.load(rows, max_katakana=0), {"先生が来た。", "一ヶ月の先生。"})  # ヶ is a counter
+        Sentence.objects.all().delete()
+        self.assertEqual(len(self.load(rows, max_katakana=3)), 4)  # ラーメン is 3 letters: ー doesn't count
+
     def test_sample_must_be_a_fraction(self):
         with self.assertRaises(CommandError):
             self.load([("先生が来た。", 1)], sample=30)
@@ -273,7 +279,7 @@ class LearningFlowTests(TestCase):
         payload = self.next()
         self.assertIn(payload["text"], ("今日は先生と会議があります。", "先生は会議室で食べました。"))
         self.assertEqual(sorted(self.word_ids(payload, "review")), sorted([teacher.id, meeting.id]))
-        self.assertEqual(set(payload["words"]), {str(teacher.id), str(meeting.id)})
+        self.assertEqual(set(payload["words"]), {str(t["word"]) for t in payload["tokens"] if t["word"]})
 
         self.assertEqual(self.submit(payload, revealed=[teacher.id], missed=[meeting.id]).status_code, 200)
         cards = {w.word_id: w.card for w in learner.words.filter(status=UserWord.REVIEW)}
@@ -297,7 +303,9 @@ class LearningFlowTests(TestCase):
         self.assertNotIn("kanji", payload)
         self.assertEqual(self.word_ids(payload, "review"), [teacher.id])
         self.assertEqual(self.word_ids(payload, "learning"), [meeting.id])
-        self.assertEqual(set(payload["words"]), {str(teacher.id), str(meeting.id)})  # string keys, known words left out
+        with_cards = {str(t["word"]) for t in payload["tokens"] if t["role"] in ("review", "learning", "known")}
+        self.assertEqual(set(payload["words"]), with_cards)  # string keys; known words too, for Tab look-ups
+        self.assertTrue({str(teacher.id), str(meeting.id)} <= set(payload["words"]))
         self.assertEqual(payload["words"][str(teacher.id)]["text"], "先生")
         self.assertEqual(payload["words"][str(teacher.id)]["reading"], "せんせい")
         self.assertEqual(payload["words"][str(teacher.id)]["meanings"], ["teacher; master"])
@@ -308,6 +316,29 @@ class LearningFlowTests(TestCase):
         self.assertEqual(
             set(payload), {"sentence_id", "text", "translation", "romaji", "tokens", "words", "stats"}
         )
+
+    def test_looking_up_a_word_you_were_assumed_to_know(self):
+        learner = self.onboard()
+        learner.words.all().delete()
+        teacher, meeting = Word.objects.get(text="先生"), Word.objects.get(text="会議")
+        later = timezone.now() + timedelta(days=10)
+        UserWord.objects.create(learner=learner, word=teacher, status=UserWord.REVIEW, due=timezone.now() - timedelta(days=1))
+        UserWord.objects.create(learner=learner, word=meeting, status=UserWord.REVIEW, due=later)  # learned, not due
+        UserWord.objects.bulk_create([
+            UserWord(learner=learner, word=word, status=UserWord.KNOWN)
+            for word in Word.objects.exclude(id__in=(teacher.id, meeting.id))
+        ])
+
+        payload = self.next()
+        roles = {t["word"]: t["role"] for t in payload["tokens"] if t["word"]}
+        self.assertEqual(roles[meeting.id], "known")
+        known = next(word_id for word_id, role in roles.items() if role == "known" and word_id != meeting.id)
+        elsewhere = Word.objects.exclude(id__in=roles).first()
+
+        self.assertEqual(self.submit(payload, revealed=[meeting.id, known, elsewhere.id]).status_code, 200)
+        self.assertEqual(learner.words.get(word_id=known).status, UserWord.LEARNING)  # back to the warm-up
+        self.assertLess(learner.words.get(word_id=meeting.id).due, later)  # reviewed as Hard: comes back sooner
+        self.assertEqual(learner.words.get(word_id=elsewhere.id).status, UserWord.KNOWN)  # not in the sentence
 
     def test_submit_rejects_wrong_text_and_stale_sentences(self):
         self.onboard()

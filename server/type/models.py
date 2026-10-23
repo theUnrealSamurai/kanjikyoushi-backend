@@ -157,7 +157,7 @@ class Learner(models.Model):
             for surface, reading, word_id in sentence.tokens
         ]
         # Every graded word, so the page can show its meaning; the keys are word ids as strings (JSON object keys).
-        graded = {t["word"] for t in tokens if t["role"] in ("review", "learning")}
+        graded = {t["word"] for t in tokens if t["role"] in ("review", "learning", "known")}  # known: for Tab look-ups
         words = {
             str(word.id): {
                 "text": word.text,
@@ -183,6 +183,8 @@ class Learner(models.Model):
 
         Review words: typed wrong -> Again, reading revealed (Tab or help mode) -> Hard, typed clean -> Good.
         New words: count one more sighting; after WARMUP_SIGHTINGS they get an FSRS card and start reviews.
+        Words you were assumed to know but looked up with Tab: a known word goes back to the warm-up
+        (furigana shown again), a learned word that wasn't due is reviewed as Hard.
         """
         sentence = Sentence.objects.filter(id=sentence_id).first()
         if sentence is None or self.current.get("sentence") != sentence_id:
@@ -206,7 +208,17 @@ class Learner(models.Model):
                 if user_word.sightings >= WARMUP_SIGHTINGS:
                     user_word.status = UserWord.REVIEW
                     user_word.review(Rating.Good, now)
-        UserWord.objects.bulk_update(graded, ["status", "sightings", "card", "due"])
+
+        in_sentence = {word_id for _, _, word_id in sentence.tokens if word_id}
+        looked_up = list(self.words.filter(
+            word_id__in=(revealed & in_sentence) - set(self.current["review"] + self.current["learning"])
+        ))
+        for user_word in looked_up:
+            if user_word.status == UserWord.KNOWN:
+                user_word.status, user_word.sightings = UserWord.LEARNING, 0
+            elif user_word.status == UserWord.REVIEW:
+                user_word.review(Rating.Hard, now)
+        UserWord.objects.bulk_update(graded + looked_up, ["status", "sightings", "card", "due"])
 
         self.recent = (self.recent + [sentence_id])[-RECENT_SENTENCES:]
         self.current = {}

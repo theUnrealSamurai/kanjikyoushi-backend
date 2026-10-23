@@ -8,7 +8,7 @@ from django.db import transaction
 from django.db.models import Count, OuterRef, Subquery
 from django.db.models.functions import Coalesce
 
-from type.corpus import is_joyo_only, romaji, tokenize
+from type.corpus import is_joyo_only, katakana_count, romaji, tokenize
 from type.dictionary import cached_dictionary, fill_meanings
 from type.models import Sentence, Word
 
@@ -64,12 +64,14 @@ class Command(BaseCommand):
                                  "is spread over the whole file instead of its first rows")
         parser.add_argument("--seed", type=int, default=0, help="random seed for --sample")
         parser.add_argument("--joyo-only", action="store_true", help="skip sentences with any non-jōyō kanji")
+        parser.add_argument("--max-katakana", type=int, metavar="N",
+                            help="skip sentences with more than N katakana letters (names, loanwords); 0 = none")
         parser.add_argument("--limit", type=int, help="stop after loading this many sentences")
         parser.add_argument("--replace", action="store_true",
                             help="delete existing sentences first (learners' progress is kept)")
 
     def handle(self, path, text_column, translation_column, min_length, max_length, min_score, score_column,
-               sample, seed, joyo_only, limit, replace, **options):
+               sample, seed, joyo_only, max_katakana, limit, replace, **options):
         if not path.exists():
             raise CommandError(f"{path} does not exist")
         if sample is not None and not 0 < sample <= 1:
@@ -89,6 +91,8 @@ class Command(BaseCommand):
             if min_score is not None and (score is None or score < min_score):
                 continue
             if sample is not None and rng.random() >= sample:  # before the kanji check: same odds, less work
+                continue
+            if max_katakana is not None and katakana_count(text) > max_katakana:
                 continue
             if (joyo_only and not is_joyo_only(text)) or text in seen:
                 continue

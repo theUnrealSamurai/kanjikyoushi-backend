@@ -30,6 +30,13 @@ class Token:
     word_reading: str = ""  # hiragana reading of the dictionary form
 
 
+KATAKANA_RE = re.compile("[\u30a1-\u30f4\u30f7-\u30fa\uff66-\uff9d]")  # letters only: not ー, and not ヵ/ヶ (counters)
+
+
+def katakana_count(text):
+    return len(KATAKANA_RE.findall(text))
+
+
 def has_kanji(text):
     return bool(KANJI_RE.search(text))
 
