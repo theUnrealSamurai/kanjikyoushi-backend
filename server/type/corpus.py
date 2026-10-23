@@ -28,6 +28,11 @@ class Token:
     reading: str            # hiragana reading of the surface ("" for kana and symbols)
     word: str | None        # dictionary form to learn, e.g. 食べる for 食べ; None if not learnable
     word_reading: str = ""  # hiragana reading of the dictionary form
+    kana_word: tuple | None = None  # (dictionary form, reading, lemma) of a kana-only word, for Tab look-ups
+
+
+# Kana-only words worth looking up with Tab (つぐむ, とりあえず). Particles and auxiliaries are grammar, not words.
+CONTENT_POS = {"名詞", "代名詞", "動詞", "形容詞", "形状詞", "副詞", "連体詞", "接続詞", "感動詞"}
 
 
 KATAKANA_RE = re.compile("[\u30a1-\u30f4\u30f7-\u30fa\uff66-\uff9d]")  # letters only: not ー, and not ヵ/ヶ (counters)
@@ -98,7 +103,7 @@ def tokenize(sentence):
         feature, surface = node.feature, node.surface
         follows_number, after_number = after_number, getattr(feature, "pos2", "") == "数詞"
         if not has_kanji(surface):
-            tokens.append(Token(surface, "", None))
+            tokens.append(Token(surface, "", None, kana_word=kana_word(feature)))
             continue
 
         reading = READING_OVERRIDES.get(surface) or to_hiragana(getattr(feature, "kana", None) or "")
@@ -110,6 +115,18 @@ def tokenize(sentence):
                      and getattr(feature, "pos2", "") not in ("固有名詞", "数詞"))
         tokens.append(Token(surface, reading, base if learnable else None, base_reading if learnable else ""))
     return tokens
+
+
+def kana_word(feature):
+    """(dictionary form, reading, lemma) for a kana-only content word, else None.
+    UniDic's lemma is the standard spelling, often with kanji (つぐむ -> 噤む), which pins down the JMdict entry."""
+    base, base_reading = getattr(feature, "orthBase", None), getattr(feature, "kanaBase", None)
+    if not base or not base_reading or getattr(feature, "pos1", "") not in CONTENT_POS:
+        return None
+    if getattr(feature, "pos2", "") in ("助動詞語幹", "数詞"):
+        return None
+    lemma = (getattr(feature, "lemma", None) or "").split("-")[0]  # "ドル-dollar" -> "ドル"
+    return base, to_hiragana(base_reading), lemma
 
 
 def romaji(sentence):

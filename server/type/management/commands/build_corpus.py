@@ -10,7 +10,7 @@ from django.db.models.functions import Coalesce
 
 from type.corpus import is_joyo_only, katakana_count, romaji, tokenize
 from type.dictionary import cached_dictionary, fill_meanings
-from type.models import Sentence, Word
+from type.models import KanaWord, Sentence, Word
 
 
 BATCH_SIZE = 1000
@@ -82,6 +82,7 @@ class Command(BaseCommand):
         rng = random.Random(seed)
 
         word_ids = {(text, reading): id for id, text, reading in Word.objects.values_list("id", "text", "reading")}
+        kana_ids = {(text, reading, lemma): id for id, text, reading, lemma in KanaWord.objects.values_list("id", "text", "reading", "lemma")}
         seen, batch, loaded = set(), [], 0
         for text, translation, score in read_sentences(path, text_column, translation_column,
                                                        score_column if min_score is not None else None):
@@ -99,12 +100,12 @@ class Command(BaseCommand):
             seen.add(text)
             batch.append((text, translation))
             if len(batch) == BATCH_SIZE:
-                loaded += self.load_batch(batch, word_ids)
+                loaded += self.load_batch(batch, word_ids, kana_ids)
                 batch = []
                 self.stdout.write(f"  {loaded} sentences loaded")
             if limit and loaded + len(batch) >= limit:
                 break
-        loaded += self.load_batch(batch, word_ids)
+        loaded += self.load_batch(batch, word_ids, kana_ids)
 
         self.update_frequencies()
         self.add_meanings()
@@ -114,7 +115,7 @@ class Command(BaseCommand):
         ))
 
     @transaction.atomic
-    def load_batch(self, batch, word_ids):
+    def load_batch(self, batch, word_ids, kana_ids):
         existing = set(Sentence.objects.filter(text__in=[text for text, _ in batch]).values_list("text", flat=True))
         rows = []
         for text, translation in batch:
@@ -132,12 +133,22 @@ class Command(BaseCommand):
             for id, text, reading in Word.objects.filter(text__in={text for text, _ in new_words}).values_list("id", "text", "reading"):
                 word_ids[(text, reading)] = id
 
+        new_kana = {t.kana_word for _, _, tokens in rows for t in tokens if t.kana_word} - kana_ids.keys()
+        KanaWord.objects.bulk_create([KanaWord(text=text, reading=reading, lemma=lemma) for text, reading, lemma in new_kana])
+        if new_kana:
+            for id, *key in KanaWord.objects.filter(text__in={text for text, _, _ in new_kana}).values_list("id", "text", "reading", "lemma"):
+                kana_ids[tuple(key)] = id
+
         sentences = Sentence.objects.bulk_create([
             Sentence(
                 text=text,
                 translation=translation,
                 romaji=romaji(text),
-                tokens=[[t.surface, t.reading, word_ids[(t.word, t.word_reading)] if t.word else None] for t in tokens],
+                tokens=[
+                    [t.surface, t.reading, word_ids[(t.word, t.word_reading)] if t.word else None,
+                     kana_ids[t.kana_word] if t.kana_word else None]
+                    for t in tokens
+                ],
             )
             for text, translation, tokens in rows
         ])
@@ -151,14 +162,14 @@ class Command(BaseCommand):
         return len(sentences)
 
     def add_meanings(self):
-        """English meanings for words that have none yet, if the dictionary has already been downloaded."""
+        """English meanings for words and kana words that have none yet, if the dictionary has already been downloaded."""
         dictionary = cached_dictionary()
         if dictionary is None:
             self.stdout.write("No dictionary yet: run `manage.py load_dictionary` to add English meanings.")
             return
-        words = Word.objects.filter(meanings=[])
-        if words.exists():
-            fill_meanings(words, dictionary)
+        words, kana_words = Word.objects.filter(meanings=[]), KanaWord.objects.filter(meanings=[])
+        if words.exists() or kana_words.exists():
+            fill_meanings(words, dictionary, kana_words)
 
     def update_frequencies(self):
         counts = (

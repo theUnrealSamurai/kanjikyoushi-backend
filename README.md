@@ -98,10 +98,10 @@ All `/type/*` endpoints need `Authorization: Bearer <access token>`.
 
 A sentence comes back as tokens. Each token has its `ruby` (furigana pairs) and a `role`:
 `review` (graded, furigana hidden), `learning` (new, furigana shown), `unseen` (not taught yet, furigana
-shown), `known`, or `null` for kana and punctuation.
+shown), `known`, or `null` for kana and punctuation. Kana-only words like つぐむ also carry a `lookup` id.
 
-The sentence also has a `words` object with the dictionary data for every `learning` and `review` word,
-keyed by word id (as a string, the same id as `token.word`):
+The sentence also has a `words` object with the dictionary data for every `learning`, `review` and `known`
+word, keyed by word id (as a string, the same id as `token.word`):
 
 ```json
 "words": {
@@ -113,6 +113,10 @@ keyed by word id (as a string, the same id as `token.word`):
 ```
 
 `meanings` is one string per sense (empty until `load_dictionary` has run).
+
+`kana_words` has the same shape (with an empty `kanji` list), keyed by `token.lookup`: meanings for
+kana-only words, found through UniDic's standard spelling (つぐむ → 噤む). Tab shows them on the page, but
+they are never learned or graded; FSRS only tracks words written with kanji.
 
 ## Tests
 

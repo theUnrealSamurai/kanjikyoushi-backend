@@ -36,11 +36,27 @@ class Word(models.Model):
         return f"{self.text} ({self.reading})"
 
 
+class KanaWord(models.Model):
+    """A word written in kana only, e.g. つぐむ or とりあえず. Tab shows its meaning; it is never learned or graded.
+    Kept apart from Word so it can't end up in the learning queue, onboarding or FSRS."""
+
+    text = models.CharField(max_length=64)    # dictionary form as written
+    reading = models.CharField(max_length=128)
+    lemma = models.CharField(max_length=64, blank=True)  # standard spelling, often kanji (噤む): finds the JMdict entry
+    meanings = models.JSONField(default=list, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["text", "reading", "lemma"], name="unique_kana_word")]
+
+    def __str__(self):
+        return f"{self.text} ({self.lemma})"
+
+
 class Sentence(models.Model):
     text = models.TextField(unique=True)
     translation = models.TextField(blank=True)
     romaji = models.TextField(blank=True)
-    tokens = models.JSONField()  # [[surface, reading, word_id or None], ...] in sentence order
+    tokens = models.JSONField()  # [[surface, reading, word_id or None, kana_word_id or None], ...] in sentence order
     words = models.ManyToManyField(Word, related_name="sentences")
 
     def __str__(self):
@@ -152,9 +168,20 @@ class Learner(models.Model):
                 return "learning"
             return "unseen" if word_id not in statuses else "known"
 
+        kana_ids = {token[3] for token in sentence.tokens if len(token) > 3 and token[3]}
+        kana_words = {
+            str(kana.id): {"text": kana.text, "reading": kana.reading, "meanings": kana.meanings, "kanji": []}
+            for kana in KanaWord.objects.filter(id__in=kana_ids).exclude(meanings=[])
+        }
         tokens = [
-            {"text": surface, "word": word_id, "role": role(word_id), "ruby": furigana(surface, reading)}
-            for surface, reading, word_id in sentence.tokens
+            {
+                "text": surface,
+                "word": word_id,
+                "role": role(word_id),
+                "ruby": furigana(surface, reading),
+                "lookup": rest[0] if rest and str(rest[0]) in kana_words else None,  # kana word with a meaning
+            }
+            for surface, reading, word_id, *rest in sentence.tokens
         ]
         # Every graded word, so the page can show its meaning; the keys are word ids as strings (JSON object keys).
         graded = {t["word"] for t in tokens if t["role"] in ("review", "learning", "known")}  # known: for Tab look-ups
@@ -174,6 +201,7 @@ class Learner(models.Model):
             "romaji": sentence.romaji,
             "tokens": tokens,
             "words": words,
+            "kana_words": kana_words,  # meanings for kana-only words, shown by Tab without any grading
             "stats": self.stats(),
         }
 
@@ -209,7 +237,7 @@ class Learner(models.Model):
                     user_word.status = UserWord.REVIEW
                     user_word.review(Rating.Good, now)
 
-        in_sentence = {word_id for _, _, word_id in sentence.tokens if word_id}
+        in_sentence = {token[2] for token in sentence.tokens if token[2]}
         looked_up = list(self.words.filter(
             word_id__in=(revealed & in_sentence) - set(self.current["review"] + self.current["learning"])
         ))

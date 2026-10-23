@@ -13,8 +13,8 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from .corpus import furigana, is_joyo_only, same_text, tokenize
-from .dictionary import cached_dictionary, find_meanings, index_by_kanji
-from .models import WARMUP_SIGHTINGS, Learner, Sentence, UserWord, Word
+from .dictionary import cached_dictionary, find_kana_meanings, find_meanings, index_by_kana, index_by_kanji
+from .models import WARMUP_SIGHTINGS, KanaWord, Learner, Sentence, UserWord, Word
 
 
 SENTENCES = [
@@ -64,6 +64,11 @@ JMDICT = {"words": [
     entry([("男", False)], [("おとこ", False)], sense("rare man")),
     entry([("男", True)], [("おとこ", True), ("おっこ", False)], sense("man; male")),
     entry([("雨", True), ("雫", False)], [("あま", True)], sense("rain"), sense("drop", kanji=("雫",))),
+    entry([("噤む", False)], [("つぐむ", False)], sense("to shut one's mouth")),
+    entry([("欠ける", True)], [("かける", True)], sense("to be chipped")),
+    entry([("掛ける", True)], [("かける", True)], sense("to hang")),
+    entry([("混な", False)], [("こんな", False)], sense("wrong one")),
+    entry([], [("こんな", True)], sense("such; like this")),
 ]}
 
 
@@ -94,6 +99,12 @@ class CorpusTests(TestCase):
         self.assertEqual([t.word for t in tokens if t.word], ["食べる"])
         self.assertEqual(next(t.reading for t in tokens if t.surface == "田中"), "たなか")
         self.assertEqual([t.word for t in tokenize("六日ほど三本の木を見た") if t.word], ["木", "見る"])
+
+    def test_kana_only_content_words_can_be_looked_up(self):
+        tokens = {t.surface: t.kana_word for t in tokenize("その言葉に思わず僕は口をつぐんでしまった。")}
+        self.assertEqual(tokens["つぐん"], ("つぐむ", "つぐむ", "噤む"))
+        self.assertIsNone(tokens["に"])  # particles are grammar, not words to look up
+        self.assertIsNone(tokens["言葉"])  # kanji words are learned instead
 
     def test_typed_text_comparison(self):
         self.assertTrue(same_text("今日は雨です", "今日は雨です。"))
@@ -185,13 +196,22 @@ class DictionaryTests(TestCase):
         self.assertEqual(find_meanings(self.index("雨"), "雨", "あま"), ["rain"])  # drop is for 雫 only
         self.assertEqual(find_meanings(self.index("猫"), "猫", "ねこ"), [])
 
+    def test_kana_words_use_the_lemma_spelling_then_kana_entries(self):
+        entries = JMDICT["words"]
+        kanji_index = index_by_kanji(entries, {"噤む", "掛ける", "こんな"})
+        kana_index = index_by_kana(entries, {"つぐむ", "かける", "こんな"})
+        find = lambda text, lemma: find_kana_meanings(kanji_index, kana_index, text, text, lemma)
+        self.assertEqual(find("つぐむ", "噤む"), ["to shut one's mouth"])
+        self.assertEqual(find("かける", "掛ける"), ["to hang"])  # the lemma picks 掛ける, not 欠ける
+        self.assertEqual(find("こんな", "こんな"), ["such; like this"])  # no kanji lemma: the kana-only entry wins
+
     def test_load_dictionary_fills_every_word_from_a_zip_or_json(self):
         Word.objects.create(text="食べる", reading="たべる")
         Word.objects.create(text="猫", reading="ねこ")
         out = StringIO()
         with tempfile.TemporaryDirectory() as folder:
             call_command("load_dictionary", file=write_dictionary(folder), stdout=out)
-            self.assertIn("1 of 2 words have meanings", out.getvalue())
+            self.assertIn("1 of 2 words and 0 of 0 kana words have meanings", out.getvalue())
             self.assertEqual(Word.objects.get(text="食べる").meanings[0], "to eat")
             self.assertEqual(Word.objects.get(text="猫").meanings, [])
 
@@ -314,7 +334,7 @@ class LearningFlowTests(TestCase):
         self.assertEqual(set(payload["words"][str(meeting.id)]["kanji"][0]),
                          {"kanji", "on_readings", "kun_readings", "meanings"})
         self.assertEqual(
-            set(payload), {"sentence_id", "text", "translation", "romaji", "tokens", "words", "stats"}
+            set(payload), {"sentence_id", "text", "translation", "romaji", "tokens", "words", "kana_words", "stats"}
         )
 
     def test_looking_up_a_word_you_were_assumed_to_know(self):
@@ -328,6 +348,9 @@ class LearningFlowTests(TestCase):
             UserWord(learner=learner, word=word, status=UserWord.KNOWN)
             for word in Word.objects.exclude(id__in=(teacher.id, meeting.id))
         ])
+        # Steer the picker to a sentence with both words: ones with only 先生 count as just typed.
+        learner.recent = list(Sentence.objects.filter(words=teacher).exclude(words=meeting).values_list("id", flat=True))
+        learner.save()
 
         payload = self.next()
         roles = {t["word"]: t["role"] for t in payload["tokens"] if t["word"]}
@@ -339,6 +362,23 @@ class LearningFlowTests(TestCase):
         self.assertEqual(learner.words.get(word_id=known).status, UserWord.LEARNING)  # back to the warm-up
         self.assertLess(learner.words.get(word_id=meeting.id).due, later)  # reviewed as Hard: comes back sooner
         self.assertEqual(learner.words.get(word_id=elsewhere.id).status, UserWord.KNOWN)  # not in the sentence
+
+    def test_kana_words_come_with_meanings_but_are_never_learned(self):
+        learner = self.onboard()
+        sentence = Sentence.objects.get(text="今日は先生と会議があります。")
+        kana = KanaWord.objects.get(text="ある")
+        kana.meanings = ["to be; to exist"]
+        kana.save()
+        learner.current = {"sentence": sentence.id, "review": [], "learning": []}
+
+        payload = learner.sentence_payload(sentence, {})
+        lookups = {t["text"]: t["lookup"] for t in payload["tokens"]}
+        self.assertEqual(lookups["あり"], kana.id)
+        self.assertIsNone(lookups["は"])
+        self.assertEqual(payload["kana_words"], {
+            str(kana.id): {"text": "ある", "reading": "ある", "meanings": ["to be; to exist"], "kanji": []},
+        })
+        self.assertFalse(Word.objects.filter(text="ある").exists())  # never a learnable, gradable word
 
     def test_submit_rejects_wrong_text_and_stale_sentences(self):
         self.onboard()

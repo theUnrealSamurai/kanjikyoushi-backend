@@ -11,8 +11,8 @@ from pathlib import Path
 
 from django.conf import settings
 
-from .corpus import to_hiragana
-from .models import Word
+from .corpus import has_kanji, to_hiragana
+from .models import KanaWord, Word
 
 
 RELEASE_URL = "https://api.github.com/repos/scriptin/jmdict-simplified/releases/latest"
@@ -66,12 +66,21 @@ def index_by_kanji(entries, texts):
     return index
 
 
+def index_by_kana(entries, readings):
+    """{reading: [entries]} for just the readings we need, for kana-only words."""
+    index = {}
+    for entry in entries:
+        for reading in {to_hiragana(form["text"]) for form in entry["kana"]} & readings:
+            index.setdefault(reading, []).append(entry)
+    return index
+
+
 def entry_meanings(entry, text, reading=None):
     """One string per sense (its English glosses joined with '; '), up to MAX_SENSES.
-    A sense that applies only to certain kanji or kana forms is skipped for the others."""
+    A sense that applies only to certain kanji or kana forms is skipped for the others (text=None: kana-only word)."""
     meanings = []
     for sense in entry["sense"]:
-        if sense["appliesToKanji"] != ["*"] and text not in sense["appliesToKanji"]:
+        if text is not None and sense["appliesToKanji"] != ["*"] and text not in sense["appliesToKanji"]:
             continue
         if reading and sense["appliesToKana"] != ["*"] and reading not in map(to_hiragana, sense["appliesToKana"]):
             continue
@@ -98,15 +107,45 @@ def find_meanings(index, text, reading):
     return []
 
 
-def fill_meanings(words, path):
-    """Set `meanings` on the given Words from the dictionary file. Returns how many got some."""
-    words = list(words)
-    index = index_by_kanji(read_entries(path), {word.text for word in words})
-    changed = []
-    for word in words:
-        meanings = find_meanings(index, word.text, word.reading)
-        if meanings and meanings != word.meanings:
-            word.meanings = meanings
-            changed.append(word)
-    Word.objects.bulk_update(changed, ["meanings"], batch_size=1000)
-    return sum(1 for word in words if word.meanings)
+def find_kana_meanings(kanji_index, kana_index, text, reading, lemma):
+    """Meanings for a kana-only word. The lemma's kanji spelling (噤む for つぐむ) picks the entry when there is
+    one; otherwise entries with this reading, preferring ones usually written in kana, then common ones."""
+    if has_kanji(lemma):
+        meanings = find_meanings(kanji_index, lemma, reading)
+        if meanings:
+            return meanings
+
+    def rank(entry):
+        usually_kana = not entry["kanji"] or "uk" in entry["sense"][0].get("misc", [])
+        common = any(k["common"] for k in entry["kana"] if to_hiragana(k["text"]) == reading)
+        return (not usually_kana, not common)
+
+    for entry in sorted(kana_index.get(reading, []), key=rank):
+        meanings = entry_meanings(entry, None, reading)
+        if meanings:
+            return meanings
+    return []
+
+
+def fill_meanings(words, path, kana_words=()):
+    """Set `meanings` on the given Words and KanaWords from the dictionary file (read once).
+    Returns how many of each have meanings."""
+    words, kana_words = list(words), list(kana_words)
+    entries = read_entries(path)
+    kanji_index = index_by_kanji(entries, {word.text for word in words} | {kana.lemma for kana in kana_words})
+    kana_index = index_by_kana(entries, {kana.reading for kana in kana_words})
+
+    def update(items, lookup, model):
+        changed = []
+        for item in items:
+            meanings = lookup(item)
+            if meanings and meanings != item.meanings:
+                item.meanings = meanings
+                changed.append(item)
+        model.objects.bulk_update(changed, ["meanings"], batch_size=1000)
+        return sum(1 for item in items if item.meanings)
+
+    return (
+        update(words, lambda word: find_meanings(kanji_index, word.text, word.reading), Word),
+        update(kana_words, lambda kana: find_kana_meanings(kanji_index, kana_index, kana.text, kana.reading, kana.lemma), KanaWord),
+    )

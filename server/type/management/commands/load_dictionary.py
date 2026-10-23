@@ -3,7 +3,7 @@ from pathlib import Path
 from django.core.management.base import BaseCommand, CommandError
 
 from type.dictionary import cached_dictionary, download_dictionary, fill_meanings
-from type.models import Word
+from type.models import KanaWord, Word
 
 
 class Command(BaseCommand):
@@ -22,6 +22,7 @@ class Command(BaseCommand):
             path = download_dictionary()
         self.stdout.write(f"Using {path}")
 
-        total = Word.objects.count()
-        filled = fill_meanings(Word.objects.all(), path)
-        self.stdout.write(self.style.SUCCESS(f"{filled} of {total} words have meanings."))
+        words, kana = fill_meanings(Word.objects.all(), path, KanaWord.objects.all())
+        self.stdout.write(self.style.SUCCESS(
+            f"{words} of {Word.objects.count()} words and {kana} of {KanaWord.objects.count()} kana words have meanings."
+        ))
