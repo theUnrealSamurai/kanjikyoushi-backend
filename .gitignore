@@ -15,3 +15,5 @@ server/assets/df_n1n5.tsv
 server/assets/df_n1plus.tsv
 server/assets/sparse_matrix_n1n5
 server/assets/sparse_matrix_n1plus
+db/
+temp/
