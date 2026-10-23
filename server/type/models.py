@@ -183,8 +183,8 @@ class Learner(models.Model):
             }
             for surface, reading, word_id, *rest in sentence.tokens
         ]
-        # Every graded word, so the page can show its meaning; the keys are word ids as strings (JSON object keys).
-        graded = {t["word"] for t in tokens if t["role"] in ("review", "learning", "known")}  # known: for Tab look-ups
+        # Dictionary data for the page's cards; the keys are word ids as strings (JSON object keys).
+        graded = {t["word"] for t in tokens if t["word"]}  # every word, so Tab can open the card of whichever comes next
         words = {
             str(word.id): {
                 "text": word.text,

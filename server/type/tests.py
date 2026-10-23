@@ -323,8 +323,8 @@ class LearningFlowTests(TestCase):
         self.assertNotIn("kanji", payload)
         self.assertEqual(self.word_ids(payload, "review"), [teacher.id])
         self.assertEqual(self.word_ids(payload, "learning"), [meeting.id])
-        with_cards = {str(t["word"]) for t in payload["tokens"] if t["role"] in ("review", "learning", "known")}
-        self.assertEqual(set(payload["words"]), with_cards)  # string keys; known words too, for Tab look-ups
+        with_cards = {str(t["word"]) for t in payload["tokens"] if t["word"]}
+        self.assertEqual(set(payload["words"]), with_cards)  # string keys; every word, so Tab can open any of them
         self.assertTrue({str(teacher.id), str(meeting.id)} <= set(payload["words"]))
         self.assertEqual(payload["words"][str(teacher.id)]["text"], "先生")
         self.assertEqual(payload["words"][str(teacher.id)]["reading"], "せんせい")

@@ -100,8 +100,8 @@ A sentence comes back as tokens. Each token has its `ruby` (furigana pairs) and 
 `review` (graded, furigana hidden), `learning` (new, furigana shown), `unseen` (not taught yet, furigana
 shown), `known`, or `null` for kana and punctuation. Kana-only words like つぐむ also carry a `lookup` id.
 
-The sentence also has a `words` object with the dictionary data for every `learning`, `review` and `known`
-word, keyed by word id (as a string, the same id as `token.word`):
+The sentence also has a `words` object with the dictionary data for every word in it (Tab can open any
+of them), keyed by word id (as a string, the same id as `token.word`):
 
 ```json
 "words": {
