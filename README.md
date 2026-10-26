@@ -20,6 +20,9 @@ The frontend lives in [kanjikyoushi-frontend](https://github.com/theUnrealSamura
   - typed without help → Good
   - needed Tab to see the reading → Hard
   - typed the wrong kanji → Again
+- **Review mode.** New words only come in while "learn new" is on. With it off, only due words are
+  targeted and the warm-up words are left alone, and when nothing is due you are done. The app nudges you
+  to clear your due words before learning more.
 - **Picking sentences.** The next sentence is the one that covers the most due and new words while
   containing the fewest words you haven't been taught yet.
 - **Onboarding.** Words made only of kanji you already know are skipped.
@@ -96,6 +99,14 @@ All `/type/*` endpoints need `Authorization: Bearer <access token>`.
 | `POST /type/onboard` | `kanji_list`: string of kanji already known | resets progress |
 | `POST /type/next` | none | the next sentence (`409` until onboarded) |
 | `POST /type/submit` | `sentence_id`, `typed`, `revealed` (word ids whose furigana was shown), `skipped` (word ids you asked how to type: not graded) | grades it and returns the next sentence |
+| `POST /type/mode` | `learn_new`: `true` (learn new words) or `false` (review only); anything else is a `400` | switches mode, drops the sentence on screen and returns the next one (or `done`, or `409` until onboarded) |
+| `POST /type/due` | none | the due list: `words` (most overdue first, at most 300), `kanji` (every distinct kanji in all due words, with how many due words use it) and the full `total_words` / `total_kanji` |
+| `POST /type/stats` | `days`: window length, clamped to 7-365 (optional, default 30) | the stats report: `today`, `totals` (incl. `retention` and `streak`), `days` (every day of the window, zero-filled, oldest first), a 7-day due `forecast`, `jlpt` progress per level and `tracking_since` (`409` until onboarded) |
+
+Every sentence and `done` response carries `stats`: `learned` (words in review), `due` (words due now),
+`due_kanji` (distinct kanji in those words), `learning` (new words being warmed up), `learned_today` and `learn_new` (the mode).
+
+History is recorded from the day it was added: a word's `learned_at` (when its warm-up finished), a log row per review of a learned word and one per typed sentence. "Today" and every per-day figure use the user's own day, so the client sends an `X-Timezone` header (an IANA name such as `Asia/Tokyo`) on every request; the server stores the last valid one and falls back to UTC. The header is allowed through CORS (`CORS_ALLOW_HEADERS`).
 
 A sentence comes back as tokens. Each token has its `ruby` (furigana pairs) and a `role`:
 `review` (graded, furigana hidden), `learning` (new, furigana shown), `unseen` (not taught yet, furigana

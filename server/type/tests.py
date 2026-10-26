@@ -1,9 +1,10 @@
 import json
 import tempfile
 import zipfile
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 from django.contrib.auth.models import User
 from django.core.management import call_command
@@ -12,9 +13,10 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from .corpus import furigana, is_joyo_only, jlpt_level, same_text, tokenize
+from .corpus import furigana, jlpt_kanji, kanji_dictionary, is_joyo_only, jlpt_level, same_text, tokenize
 from .dictionary import cached_dictionary, find_kana_meanings, find_meanings, index_by_kana, index_by_kanji
-from .models import WARMUP_SIGHTINGS, KanaWord, Learner, Sentence, UserWord, Word
+from . import models
+from .models import WARMUP_SIGHTINGS, KanaWord, Learner, ReviewLog, Sentence, SentenceLog, UserWord, Word
 
 
 SENTENCES = [
@@ -437,3 +439,297 @@ class LearningFlowTests(TestCase):
         first = self.next()
         self.assertEqual(self.next()["sentence_id"], first["sentence_id"])
         self.assertEqual(self.client.post("/type/next").json()["tokens"], first["tokens"])
+
+    def give_due(self, learner, days_overdue):
+        """Reset progress to just these review words, each due that many days ago: {text: days}."""
+        learner.words.all().delete()
+        now = timezone.now()
+        for text, days in days_overdue.items():
+            UserWord.objects.create(
+                learner=learner, word=Word.objects.get(text=text), status=UserWord.REVIEW, due=now - timedelta(days=days)
+            )
+
+    def set_mode(self, learn_new):
+        return self.client.post("/type/mode", {"learn_new": learn_new}, format="json")
+
+    def test_review_mode_brings_in_no_new_words_and_grades_only_due_words(self):
+        learner = self.onboard()
+        self.give_due(learner, {"先生": 1})
+        teacher, meeting = Word.objects.get(text="先生"), Word.objects.get(text="会議")
+        UserWord.objects.create(learner=learner, word=meeting, status=UserWord.LEARNING)  # being warmed up
+        # Steer the picker to the sentence with both words.
+        learner.recent = list(Sentence.objects.filter(words=teacher).exclude(words=meeting).values_list("id", flat=True))
+        learner.save()
+
+        response = self.set_mode(False)
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["text"], "今日は先生と会議があります。")
+        self.assertEqual(self.word_ids(payload, "review"), [teacher.id])
+        self.assertEqual(self.word_ids(payload, "learning"), [])
+        self.assertEqual(self.word_ids(payload, "unseen").count(meeting.id), 1)  # a warm-up word left alone: furigana shown
+        self.assertEqual(learner.words.count(), 2)  # no new words were added
+
+        done = self.submit(payload).json()
+        self.assertTrue(done["done"])  # nothing else is due
+        self.assertIsNotNone(learner.words.get(word=teacher).card)
+        self.assertEqual(learner.words.get(word=meeting).sightings, 0)
+        self.assertEqual(learner.words.get(word=meeting).status, UserWord.LEARNING)
+
+    def test_review_mode_with_nothing_due_is_done_and_learning_resumes_when_switched_back(self):
+        self.onboard()
+        done = self.set_mode(False).json()
+        self.assertTrue(done["done"])
+        self.assertFalse(done["stats"]["learn_new"])
+        self.assertEqual(self.next(), done)
+        self.assertEqual(self.client.post("/type/due").json()["total_words"], 0)
+
+        payload = self.set_mode(True).json()
+        self.assertTrue(payload["stats"]["learn_new"])
+        self.assertTrue(self.word_ids(payload, "learning"))
+
+    def test_switching_mode_drops_the_pending_sentence(self):
+        learner = self.onboard()
+        self.next()
+        self.assertTrue(Learner.objects.get(user=self.user).current)
+        self.set_mode(False)
+        learner.refresh_from_db()
+        self.assertEqual(learner.current, {})
+        self.assertFalse(learner.learn_new)
+
+    def test_mode_needs_a_real_boolean_and_onboarding(self):
+        learner = self.onboard()
+        for body in ({}, {"learn_new": "false"}, {"learn_new": 0}, {"learn_new": None}):
+            response = self.client.post("/type/mode", body, format="json")
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.json(), {"error": "Expected 'learn_new': true or false."})
+        learner.refresh_from_db()
+        self.assertTrue(learner.learn_new)
+        self.client.force_authenticate(User.objects.create_user("jiro", password="a-long-password"))
+        self.assertEqual(self.set_mode(False).status_code, 409)  # not onboarded
+
+    def test_due_list_has_most_overdue_words_first_and_distinct_kanji_with_counts(self):
+        learner = self.onboard()
+        Word.objects.create(text="学生", reading="がくせい", frequency=1)  # shares 生 with 先生
+        self.give_due(learner, {"食べる": 1, "学生": 2, "先生": 3, "室": 4})
+        UserWord.objects.create(
+            learner=learner, word=Word.objects.get(text="雨"), status=UserWord.REVIEW, due=timezone.now() + timedelta(days=5)
+        )  # learned but not due
+        Word.objects.filter(text="食べる").update(meanings=["to eat"])
+
+        data = self.client.post("/type/due").json()
+        self.assertEqual([w["text"] for w in data["words"]], ["室", "先生", "学生", "食べる"])
+        self.assertEqual(set(data["words"][3]), {"id", "text", "reading", "meanings", "due"})
+        self.assertEqual(data["words"][3]["id"], Word.objects.get(text="食べる").id)
+        self.assertEqual(data["words"][3]["reading"], "たべる")
+        self.assertEqual(data["words"][3]["meanings"], ["to eat"])
+        self.assertEqual(data["words"][0]["meanings"], [])
+        self.assertEqual([(k["kanji"], k["words"]) for k in data["kanji"]],
+                         [("室", 1), ("先", 1), ("生", 2), ("学", 1), ("食", 1)])
+        self.assertEqual(data["kanji"][0]["meanings"], kanji_dictionary()["室"]["meanings"])
+        self.assertEqual((data["total_words"], data["total_kanji"]), (4, 5))
+
+        with patch.object(models, "DUE_LIST_LIMIT", 2):  # the cap shortens the word list only
+            capped = self.client.post("/type/due").json()
+        self.assertEqual([w["text"] for w in capped["words"]], ["室", "先生"])
+        self.assertEqual(capped["kanji"], data["kanji"])
+        self.assertEqual((capped["total_words"], capped["total_kanji"]), (4, 5))
+
+    def test_stats_count_due_words_and_kanji(self):
+        learner = self.onboard()
+        self.give_due(learner, {"会議": 2, "先生": 1, "雨": 1})
+        stats = learner.stats()
+        self.assertEqual((stats["due"], stats["due_kanji"], stats["learn_new"]), (3, 5, True))  # 会 議 先 生 雨
+        self.assertEqual(self.client.post("/type/due").json()["total_kanji"], stats["due_kanji"])
+
+    def at(self, *args):
+        """A UTC moment: at(2026, 3, 10, 3) is 2026-03-10 03:00 UTC."""
+        return datetime(*args, tzinfo=dt_timezone.utc)
+
+    def warm_up(self, learner, *texts):
+        """Reset progress: these words are one sighting from finishing the warm-up, every other word is known."""
+        learner.words.all().delete()
+        UserWord.objects.bulk_create(
+            UserWord(learner=learner, word=word, status=UserWord.LEARNING if word.text in texts else UserWord.KNOWN,
+                     sightings=WARMUP_SIGHTINGS - 1)
+            for word in Word.objects.all()
+        )
+
+    def test_every_sentence_has_a_new_word_while_learning_is_on(self):
+        learner = self.onboard()
+        self.give_due(learner, {"先生": 1, "会議": 1, "食べる": 1})
+        served = 0
+        for _ in range(8):
+            payload = self.next()
+            if payload.get("done"):
+                break
+            self.assertTrue(self.word_ids(payload, "learning"), payload["text"])
+            self.assertEqual(self.submit(payload).status_code, 200)
+            served += 1
+        self.assertGreaterEqual(served, 3)
+
+    def test_learned_at_is_set_once_when_the_warm_up_finishes(self):
+        learner = self.onboard()
+        self.warm_up(learner, "先生")
+        first, later = self.at(2026, 3, 10, 3), self.at(2026, 3, 20, 3)
+        with patch.object(timezone, "now", return_value=first):
+            self.submit(self.next())
+        teacher = learner.words.get(word__text="先生")
+        self.assertEqual((teacher.status, teacher.learned_at), (UserWord.REVIEW, first))
+        self.assertFalse(ReviewLog.objects.exists())  # the graduation review isn't logged
+        self.assertEqual(SentenceLog.objects.filter(learner=learner, at=first).count(), 1)
+
+        teacher.status, teacher.sightings = UserWord.LEARNING, WARMUP_SIGHTINGS - 1  # sent back, then graduates again
+        teacher.save()
+        learner.refresh_from_db()
+        with patch.object(timezone, "now", return_value=later):
+            self.submit(self.next())
+        self.assertEqual(learner.words.get(word__text="先生").learned_at, first)
+        self.assertEqual(SentenceLog.objects.filter(learner=learner).count(), 2)
+
+    def test_reviews_are_logged_for_graded_due_words_and_looked_up_learned_words(self):
+        learner = self.onboard()
+        learner.words.all().delete()
+        teacher, meeting = Word.objects.get(text="先生"), Word.objects.get(text="会議")
+        UserWord.objects.create(learner=learner, word=teacher, status=UserWord.REVIEW, due=timezone.now() - timedelta(days=1))
+        UserWord.objects.create(learner=learner, word=meeting, status=UserWord.REVIEW, due=timezone.now() + timedelta(days=10))
+        UserWord.objects.bulk_create([
+            UserWord(learner=learner, word=word, status=UserWord.KNOWN)
+            for word in Word.objects.exclude(id__in=(teacher.id, meeting.id))
+        ])
+        learner.recent = list(Sentence.objects.filter(words=teacher).exclude(words=meeting).values_list("id", flat=True))
+        learner.save()
+
+        self.submit(self.next(), revealed=[meeting.id])  # 先生 is due and graded; 会議 is learned, looked up
+        ratings = dict(ReviewLog.objects.filter(learner=learner).values_list("word_id", "rating"))
+        self.assertEqual(ratings, {teacher.id: 3, meeting.id: 2})  # Good, Hard
+        self.assertEqual(SentenceLog.objects.filter(learner=learner).count(), 1)
+
+    def test_onboarding_again_clears_the_history(self):
+        learner = self.onboard()
+        ReviewLog.objects.create(learner=learner, word=Word.objects.first(), rating=3, at=timezone.now())
+        SentenceLog.objects.create(learner=learner, at=timezone.now())
+        self.onboard()
+        self.assertEqual((ReviewLog.objects.count(), SentenceLog.objects.count()), (0, 0))
+
+    def test_learned_today_uses_the_timezone_from_the_header(self):
+        learner = self.onboard()
+        UserWord.objects.update_or_create(
+            learner=learner, word=Word.objects.get(text="雨"),
+            defaults={"status": UserWord.REVIEW, "due": self.at(2026, 4, 1), "learned_at": self.at(2026, 3, 10, 14)},
+        )  # 14:00 UTC is 23:00 on the 10th in Tokyo
+        with patch.object(timezone, "now", return_value=self.at(2026, 3, 10, 16, 30)):  # the 11th, 01:30 in Tokyo
+            utc = self.next()["stats"]["learned_today"]
+            tokyo = self.client.post("/type/next", HTTP_X_TIMEZONE="Asia/Tokyo").json()["stats"]["learned_today"]
+        self.assertEqual((utc, tokyo), (1, 0))
+        self.assertEqual(Learner.objects.get(user=self.user).timezone, "Asia/Tokyo")
+
+    def test_invalid_timezone_headers_are_ignored(self):
+        self.onboard()
+        for name in ("Not/AZone", "America", "../etc/passwd", "/etc/localtime", "x" * 100):
+            self.client.post("/type/next", HTTP_X_TIMEZONE=name)
+            self.assertEqual(Learner.objects.get(user=self.user).timezone, "", name)
+        self.client.post("/type/next", HTTP_X_TIMEZONE="Asia/Tokyo")
+        self.client.post("/type/next", HTTP_X_TIMEZONE="Not/AZone")
+        learner = Learner.objects.get(user=self.user)
+        self.assertEqual((learner.timezone, str(learner.zone())), ("Asia/Tokyo", "Asia/Tokyo"))
+        learner.timezone = "garbage"
+        self.assertEqual(str(learner.zone()), "UTC")
+
+    def test_stats_needs_onboarding_and_clamps_the_window(self):
+        self.assertEqual(self.client.post("/type/stats").status_code, 409)
+        self.assertEqual(self.client.post("/type/stats").json(), {"error": "not_onboarded"})
+        self.onboard()
+        counts = [len(self.client.post("/type/stats", body, format="json").json()["days"])
+                  for body in ({}, {"days": 1}, {"days": 9999}, {"days": 14}, {"days": "x"})]
+        self.assertEqual(counts, [30, 7, 365, 14, 30])
+
+    def build_history(self):
+        """Learner in Tokyo; now is 2026-03-10 12:00 there. Four learned words, one of them before tracking."""
+        learner = self.onboard("雨")
+        learner.timezone = "Asia/Tokyo"
+        learner.save()
+        learner.words.all().delete()
+        for text, learned_at, due in [
+            ("先生", None, self.at(2026, 3, 1)),                               # before tracking, overdue
+            ("会議", self.at(2026, 3, 9, 20), self.at(2026, 3, 10, 16)),       # learned on the 10th in Tokyo, due on the 11th there
+            ("雨", self.at(2026, 3, 8), self.at(2026, 3, 11, 16)),             # kanji known at onboarding, due on the 12th there
+            ("食べる", self.at(2026, 3, 5, 12), self.at(2026, 3, 20)),
+        ]:
+            UserWord.objects.create(learner=learner, word=Word.objects.get(text=text), status=UserWord.REVIEW,
+                                    learned_at=learned_at, due=due)
+        word = Word.objects.create(text="学生", reading="がくせい", frequency=1)
+        UserWord.objects.create(learner=learner, word=word, status=UserWord.LEARNING)
+        for rating, at in [(3, self.at(2026, 3, 10, 2)), (2, self.at(2026, 3, 10, 2)),
+                           (4, self.at(2026, 3, 9, 20)), (3, self.at(2026, 2, 1, 12))]:
+            ReviewLog.objects.create(learner=learner, word=word, rating=rating, at=at)
+        for at in [self.at(2026, 3, 10, 2), self.at(2026, 3, 10, 3), self.at(2026, 3, 9, 2),
+                   self.at(2026, 3, 8, 2), self.at(2026, 3, 6, 2)]:
+            SentenceLog.objects.create(learner=learner, at=at)
+        return learner
+
+    def test_report_has_the_shape_of_the_stats_contract(self):
+        self.build_history()
+        with patch.object(timezone, "now", return_value=self.at(2026, 3, 10, 3)):
+            report = self.client.post("/type/stats", {"days": 7}, format="json").json()
+        self.assertEqual(set(report), {"today", "totals", "days", "forecast", "jlpt", "tracking_since"})
+        self.assertEqual(set(report["today"]), {"words", "kanji", "reviews", "sentences"})
+        self.assertEqual(set(report["totals"]), {"words", "kanji", "known_kanji", "learning", "due", "sentences",
+                                                 "reviews", "retention", "streak"})
+        self.assertEqual(set(report["days"][0]), {"date", "words", "kanji", "reviews", "hard", "sentences",
+                                                  "total_words", "total_kanji"})
+        self.assertEqual(set(report["forecast"][0]), {"date", "due"})
+        self.assertEqual(set(report["jlpt"][0]), {"level", "total", "learned", "known"})
+
+    def test_report_buckets_history_by_local_day(self):
+        learner = self.build_history()
+        with patch.object(timezone, "now", return_value=self.at(2026, 3, 10, 3)):
+            report = learner.report(7)
+
+        days = report["days"]
+        self.assertEqual([d["date"] for d in days], [f"2026-03-{n:02d}" for n in range(4, 11)])  # zero-filled, ends today
+        self.assertEqual([d["words"] for d in days], [0, 1, 0, 0, 1, 0, 1])
+        self.assertEqual([d["kanji"] for d in days], [0, 1, 0, 0, 0, 0, 2])  # 食; 会 議 (先生 predates tracking, 雨 was known)
+        self.assertEqual([d["total_words"] for d in days], [1, 2, 2, 2, 3, 3, 4])  # 先生 counts from the start
+        self.assertEqual([d["total_kanji"] for d in days], [2, 3, 3, 3, 3, 3, 5])
+        self.assertEqual([d["reviews"] for d in days], [0, 0, 0, 0, 0, 0, 3])
+        self.assertEqual([d["hard"] for d in days], [0, 0, 0, 0, 0, 0, 1])
+        self.assertEqual([d["sentences"] for d in days], [0, 0, 1, 0, 1, 1, 2])
+        self.assertEqual(report["today"], {"words": 1, "kanji": 2, "reviews": 3, "sentences": 2})
+
+        levels = jlpt_kanji()
+        learned = set("先生会議食")  # 雨 is known, so it isn't learned in the app
+        totals = report["totals"]
+        self.assertEqual(totals, {
+            "words": 4, "kanji": 5, "known_kanji": len(learner.known_kanji), "learning": 1, "due": 1,
+            "sentences": 5, "reviews": 4, "retention": 2 / 3,  # the February review is outside the window
+            "streak": 3,  # the 8th, 9th and 10th; nothing on the 7th
+        })
+        self.assertEqual(report["tracking_since"], "2026-02-01")
+        self.assertEqual(
+            report["forecast"],
+            [{"date": f"2026-03-{n}", "due": due} for n, due in zip(range(10, 17), [1, 1, 1, 0, 0, 0, 0])],
+        )  # 先生 is overdue so it counts today; the rest fall on their Tokyo dates
+        self.assertEqual([j["level"] for j in report["jlpt"]], [5, 4, 3, 2, 1])
+        for entry in report["jlpt"]:
+            in_level = {k for k, level in levels.items() if level == entry["level"]}
+            self.assertEqual(entry["total"], len(in_level))
+            self.assertEqual(entry["learned"], len(in_level & learned))
+            self.assertEqual(entry["known"], len(in_level & set(learner.known_kanji)))
+
+    def test_streak_ends_yesterday_until_something_is_typed_today(self):
+        learner = self.build_history()
+        with patch.object(timezone, "now", return_value=self.at(2026, 3, 10, 14)):  # the 10th, 23:00 in Tokyo
+            self.assertEqual(learner.report(7)["totals"]["streak"], 3)
+        SentenceLog.objects.filter(learner=learner, at__gte=self.at(2026, 3, 10)).delete()
+        with patch.object(timezone, "now", return_value=self.at(2026, 3, 10, 3)):
+            self.assertEqual(learner.report(7)["totals"]["streak"], 2)  # the 8th and 9th
+        with patch.object(timezone, "now", return_value=self.at(2026, 3, 11, 3)):
+            self.assertEqual(learner.report(7)["totals"]["streak"], 0)  # the 9th was two days ago
+
+    def test_report_for_a_learner_with_no_history(self):
+        self.onboard()
+        report = self.client.post("/type/stats").json()
+        self.assertIsNone(report["totals"]["retention"])
+        self.assertIsNone(report["tracking_since"])
+        self.assertEqual((report["totals"]["streak"], report["totals"]["words"]), (0, 0))
