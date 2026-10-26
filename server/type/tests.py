@@ -358,7 +358,8 @@ class LearningFlowTests(TestCase):
         self.assertEqual(set(payload["words"][str(meeting.id)]["kanji"][0]),
                          {"kanji", "on_readings", "kun_readings", "meanings"})
         self.assertEqual(
-            set(payload), {"sentence_id", "text", "translation", "romaji", "tokens", "words", "kana_words", "stats"}
+            set(payload),
+            {"sentence_id", "text", "translation", "romaji", "tokens", "words", "kana_words", "extra_words", "stats"},
         )
 
     def test_skipped_review_words_are_not_graded(self):
@@ -425,6 +426,24 @@ class LearningFlowTests(TestCase):
             str(kana.id): {"text": "ある", "reading": "ある", "meanings": ["to be; to exist"], "kanji": []},
         })
         self.assertFalse(Word.objects.filter(text="ある").exists())  # never a learnable, gradable word
+
+    def test_names_and_numbers_get_a_card_for_tab_but_are_never_graded(self):
+        learner = self.onboard()
+        trees = Word.objects.create(text="木々", reading="きぎ")
+        sentence = Sentence.objects.create(text="木々が一振りに田中さん。", tokens=[
+            ["木々", "きぎ", trees.id, None], ["が", "", None, None], ["一", "いち", None, None],
+            ["振り", "ふり", None, None], ["に", "", None, None], ["田中", "たなか", None, None],
+            ["さん", "", None, None], ["。", "", None, None],
+        ])
+        learner.current = {"sentence": sentence.id, "review": [], "learning": []}
+
+        payload = learner.sentence_payload(sentence, {})
+        self.assertEqual([t["extra"] for t in payload["tokens"]], [None, None, 2, 2, None, 5, None, None])
+        self.assertEqual({key: (card["text"], card["reading"]) for key, card in payload["extra_words"].items()},
+                         {"2": ("一振り", "いちふり"), "5": ("田中", "たなか")})
+        self.assertEqual(payload["extra_words"]["2"]["meanings"], [])
+        self.assertEqual([k["kanji"] for k in payload["extra_words"]["2"]["kanji"]], ["一", "振"])
+        self.assertEqual(set(payload["words"]), {str(trees.id)})  # nothing to grade beyond the real word
 
     def test_submit_rejects_wrong_text_and_stale_sentences(self):
         self.onboard()

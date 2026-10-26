@@ -8,7 +8,7 @@ from django.db import models
 from django.utils import timezone
 from fsrs import Card, Rating, Scheduler
 
-from .corpus import KANJI_RE, furigana, jlpt_kanji, kanji_dictionary, kanji_info, same_text
+from .corpus import KANJI_RE, furigana, has_kanji, jlpt_kanji, kanji_dictionary, kanji_info, same_text
 
 
 scheduler = Scheduler()
@@ -381,6 +381,20 @@ class Learner(models.Model):
             }
             for surface, reading, word_id, *rest in sentence.tokens
         ]
+        # Names, numbers and counters have kanji but no word to learn. Tab still opens a card for them (reading and
+        # kanji, never graded) instead of skipping ahead; a run of them shares one card, so 一振り reads as one word.
+        extra_words, start = {}, None
+        for index, (token, (surface, reading, *_)) in enumerate(zip(tokens, sentence.tokens)):
+            if token["word"] is None and has_kanji(surface):
+                start = index if start is None else start
+                card = extra_words.setdefault(str(start), {"text": "", "reading": "", "meanings": [], "kanji": []})
+                card["text"] += surface
+                card["reading"] += reading
+            else:
+                start = None
+            token["extra"] = start
+        for card in extra_words.values():
+            card["kanji"] = kanji_info(card["text"])
         # Dictionary data for the page's cards; the keys are word ids as strings (JSON object keys).
         graded = {t["word"] for t in tokens if t["word"]}  # every word, so Tab can open the card of whichever comes next
         words = {
@@ -400,6 +414,7 @@ class Learner(models.Model):
             "tokens": tokens,
             "words": words,
             "kana_words": kana_words,  # meanings for kana-only words, shown by Tab without any grading
+            "extra_words": extra_words,  # names, numbers and counters, keyed by token "extra"; never graded
             "stats": self.stats(),
         }
 
