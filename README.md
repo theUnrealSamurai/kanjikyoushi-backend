@@ -61,8 +61,9 @@ prints a reminder to run `load_dictionary`.
 
 ### Filtering a big corpus
 
-The file is streamed row by row, never loaded whole, so a multi-gigabyte table is fine. These options
-skip rows before they are tokenized:
+The file is streamed row by row, never loaded whole, so a multi-gigabyte table is fine. Invisible format
+characters (direction marks, zero-width spaces) are always dropped from the text, since nobody can type them.
+These options skip rows before they are tokenized:
 
 | Option | |
 |---|---|

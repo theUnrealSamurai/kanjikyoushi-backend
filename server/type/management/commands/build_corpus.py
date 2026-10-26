@@ -8,7 +8,7 @@ from django.db import transaction
 from django.db.models import Count, OuterRef, Subquery
 from django.db.models.functions import Coalesce
 
-from type.corpus import is_joyo_only, jlpt_level, katakana_count, romaji, tokenize
+from type.corpus import is_joyo_only, jlpt_level, katakana_count, romaji, strip_invisible, tokenize
 from type.dictionary import cached_dictionary, fill_meanings
 from type.models import KanaWord, Sentence, Word
 
@@ -20,11 +20,11 @@ def read_sentences(path, text_column, translation_column, score_column=None):
     """Yield (text, translation, score) from a .txt file (one sentence per line) or a .tsv/.csv with a header row.
     The old df_n1n5*.tsv exports work as they are: their sentence column is called "text".
     The file is streamed, so it can be gigabytes. The score (a float, or None if missing or invalid)
-    is only read when a score column is given."""
+    is only read when a score column is given. Invisible characters (strip_invisible) are dropped from the text."""
     if path.suffix == ".txt":
         with open(path, encoding="utf-8") as file:
             for line in file:
-                yield line.strip(), "", None
+                yield strip_invisible(line).strip(), "", None
         return
 
     csv.field_size_limit(sys.maxsize)
@@ -36,7 +36,7 @@ def read_sentences(path, text_column, translation_column, score_column=None):
             raise CommandError(f"No '{score_column}' column in {path.name}; columns are {reader.fieldnames}")
         for row in reader:
             score = parse_score(row[score_column]) if score_column else None
-            yield (row[text_column] or "").strip(), (row.get(translation_column) or "").strip(), score
+            yield strip_invisible(row[text_column] or "").strip(), (row.get(translation_column) or "").strip(), score
 
 
 def parse_score(value):

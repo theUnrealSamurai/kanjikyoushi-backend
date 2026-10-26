@@ -21,6 +21,12 @@ TRAILING_PUNCTUATION = "。.!?！？"
 # UniDic reads some very common words formally (私 as わたくし); use the everyday reading instead.
 READING_OVERRIDES = {"私": "わたし"}
 
+# UniDic splits 1人 and 2人 into a bare number and the counter 人 (にん), but they're read ひとり and ふたり, like
+# 一人 and 二人. Not after another digit (12人 is じゅうににん) and not before 前 (1人前, a serving, is いちにんまえ).
+PEOPLE = {"1": "ひとり", "１": "ひとり", "2": "ふたり", "２": "ふたり"}
+DIGITS = "0123456789０１２３４５６７８９.．,，"
+PEOPLE_ROMAJI_RE = re.compile(r"(?<![0-9.,])([12])nin(?! ?mae)")  # cutlet's romaji has the same mistake: 2nin
+
 
 @dataclass
 class Token:
@@ -48,6 +54,18 @@ def has_kanji(text):
 
 def to_hiragana(text):
     return "".join(chr(ord(c) - 0x60) if "ァ" <= c <= "ヶ" else c for c in text)
+
+
+@lru_cache(maxsize=1)
+def invisible_re():
+    """Format characters (Unicode category Cf: direction marks, zero-width spaces, the BOM...). They don't show and
+    nobody can type them, so a sentence with one could never be finished."""
+    chars = "".join(re.escape(chr(c)) for c in range(0x110000) if unicodedata.category(chr(c)) == "Cf")
+    return re.compile(f"[{chars}]")
+
+
+def strip_invisible(text):
+    return invisible_re().sub("", text)
 
 
 def normalize(text):
@@ -114,7 +132,28 @@ def tokenize(sentence):
         learnable = (reading and base_reading and has_kanji(base) and not follows_number
                      and getattr(feature, "pos2", "") not in ("固有名詞", "数詞"))
         tokens.append(Token(surface, reading, base if learnable else None, base_reading if learnable else ""))
+    for index, reading in sorted(counted_people([t.surface for t in tokens], [t.reading for t in tokens]).items(), reverse=True):
+        tokens[index:index + 2] = [Token(tokens[index].surface + "人", reading, None)]
     return tokens
+
+
+def counted_people(surfaces, readings):
+    """Where a number token and the 人 after it read ひとり or ふたり (see PEOPLE): {index of the number: reading}."""
+    return {
+        index: PEOPLE[surface]
+        for index, surface in enumerate(surfaces[:-1])
+        if surface in PEOPLE and surfaces[index + 1] == "人" and readings[index + 1] == "にん"
+        and not (index and surfaces[index - 1][-1] in DIGITS)
+        and not (index + 2 < len(surfaces) and surfaces[index + 2].startswith("前"))
+    }
+
+
+def people_romaji(text):
+    """Romaji with 1nin and 2nin read hitori and futari (see PEOPLE), capitalized where a sentence starts."""
+    def word(match):
+        spelled = "hitori" if match[1] == "1" else "futari"
+        return spelled.capitalize() if text[:match.start()].rstrip()[-1:] in ("", ".", "!", "?") else spelled
+    return PEOPLE_ROMAJI_RE.sub(word, text)
 
 
 def kana_word(feature):
@@ -131,7 +170,7 @@ def kana_word(feature):
 
 def romaji(sentence):
     try:
-        return romanizer().romaji(sentence)
+        return people_romaji(romanizer().romaji(sentence))
     except Exception:
         return ""
 

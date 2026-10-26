@@ -1,3 +1,4 @@
+import importlib
 import json
 import tempfile
 import zipfile
@@ -6,6 +7,7 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
+from django.apps import apps
 from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.core.management.base import CommandError
@@ -13,7 +15,9 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from .corpus import furigana, jlpt_kanji, kanji_dictionary, is_joyo_only, jlpt_level, same_text, tokenize
+from .corpus import (
+    furigana, jlpt_kanji, kanji_dictionary, is_joyo_only, jlpt_level, people_romaji, same_text, strip_invisible, tokenize,
+)
 from .dictionary import cached_dictionary, find_kana_meanings, find_meanings, index_by_kana, index_by_kanji
 from . import models
 from .models import WARMUP_SIGHTINGS, KanaWord, Learner, ReviewLog, Sentence, SentenceLog, UserWord, Word
@@ -102,6 +106,42 @@ class CorpusTests(TestCase):
         self.assertEqual(next(t.reading for t in tokens if t.surface == "田中"), "たなか")
         self.assertEqual([t.word for t in tokenize("六日ほど三本の木を見た") if t.word], ["木", "見る"])
 
+    def test_one_and_two_people_read_hitori_and_futari(self):
+        def readings(sentence):
+            return {t.surface: t.reading for t in tokenize(sentence) if t.reading}
+        self.assertEqual(readings("2人きりで立つ。")["2人"], "ふたり")
+        self.assertEqual(readings("1人1人に聞く。")["1人"], "ひとり")
+        self.assertEqual(readings("12人で行く。")["人"], "にん")  # じゅうににん
+        self.assertEqual(readings("3人で行く。")["人"], "にん")
+        self.assertEqual(readings("1人前の料理。")["人"], "にん")  # いちにんまえ, a serving
+        self.assertIsNone(next(t.word for t in tokenize("2人で行く。") if t.surface == "2人"))  # numbers aren't graded
+        self.assertEqual(people_romaji("2nin kiri de tatsu."), "Futari kiri de tatsu.")
+        self.assertEqual(people_romaji("Itta. 1nin de iku."), "Itta. Hitori de iku.")
+        self.assertEqual(people_romaji("Kare wa 2nin wo mita."), "Kare wa futari wo mita.")
+        self.assertEqual(people_romaji("12nin to 1nin mae."), "12nin to 1nin mae.")
+
+    def test_invisible_characters_are_dropped(self):
+        self.assertEqual(strip_invisible("\u202c2人きり\u200b。\ufeff"), "2人きり。")
+        self.assertEqual(strip_invisible("言語\u3000です"), "言語\u3000です")  # spaces can be typed
+
+    def test_migration_fixes_sentences_built_before(self):
+        fix_sentences = importlib.import_module("type.migrations.0008_typable_text").fix_sentences
+        hidden = Sentence.objects.create(text="\u202c2人きり。", romaji="? 2nin kiri.", tokens=[
+            ["\u202c", "", None, None], ["2", "", None, None], ["人", "にん", None, None], ["きり。", "", None, None]])
+        copy = Sentence.objects.create(text="\u202c雨です。", tokens=[["\u202c", "", None, None], ["雨", "あめ", None, None], ["です。", "", None, None]])
+        Sentence.objects.create(text="雨です。", tokens=[["雨", "あめ", None, None], ["です。", "", None, None]])
+        crowd = Sentence.objects.create(text="12人で。", romaji="12nin de.", tokens=[
+            ["12", "", None, None], ["人", "にん", None, None], ["で。", "", None, None]])
+
+        fix_sentences(apps, None)
+        hidden.refresh_from_db()
+        crowd.refresh_from_db()
+        self.assertEqual(hidden.text, "2人きり。")
+        self.assertEqual(hidden.tokens, [["2人", "ふたり", None, None], ["きり。", "", None, None]])
+        self.assertEqual(hidden.romaji, "Futari kiri.")
+        self.assertFalse(Sentence.objects.filter(id=copy.id).exists())  # would be a second 雨です。
+        self.assertEqual((crowd.tokens[1], crowd.romaji), (["人", "にん", None, None], "12nin de."))
+
     def test_kana_only_content_words_can_be_looked_up(self):
         tokens = {t.surface: t.kana_word for t in tokenize("その言葉に思わず僕は口をつぐんでしまった。")}
         self.assertEqual(tokens["つぐん"], ("つぐむ", "つぐむ", "噤む"))
@@ -177,6 +217,9 @@ class FilterTests(TestCase):
         self.assertEqual(self.load(rows, max_katakana=0), {"先生が来た。", "一ヶ月の先生。"})  # ヶ is a counter
         Sentence.objects.all().delete()
         self.assertEqual(len(self.load(rows, max_katakana=3)), 4)  # ラーメン is 3 letters: ー doesn't count
+
+    def test_invisible_characters_are_dropped_from_the_text(self):
+        self.assertEqual(self.load([("\u202c先生が来た。", 1)]), {"先生が来た。"})
 
     def test_sample_must_be_a_fraction(self):
         with self.assertRaises(CommandError):

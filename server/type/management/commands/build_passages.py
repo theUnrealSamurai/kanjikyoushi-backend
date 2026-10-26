@@ -16,7 +16,7 @@ from pathlib import Path
 
 from django.core.management.base import BaseCommand, CommandError
 
-from type.corpus import KANJI_RE, is_joyo_only, jlpt_kanji, jlpt_level, katakana_count, romaji, tokenize
+from type.corpus import KANJI_RE, is_joyo_only, jlpt_kanji, jlpt_level, katakana_count, romaji, strip_invisible, tokenize
 from type.dictionary import (
     cached_dictionary, find_kana_meanings, find_meanings, index_by_kana, index_by_kanji, read_entries,
 )
@@ -123,7 +123,7 @@ def paragraphs_of(text):
     """The work's paragraphs (non-blank lines) with their position among ALL of them, leading full-width space stripped."""
     position = 0
     for line in text.split("\n"):
-        paragraph = line.strip().strip("　").strip()
+        paragraph = strip_invisible(line).strip().strip("　").strip()
         if not paragraph:
             continue
         yield position, paragraph
