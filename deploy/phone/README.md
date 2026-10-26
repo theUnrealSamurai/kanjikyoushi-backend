@@ -187,6 +187,18 @@ adb shell -t "su -c 'sh /data/debian/srv/kanjikyoushi/phone/chroot.sh shell'"   
 Both give a root shell inside Debian. For Django commands use `phone/manage.sh`, e.g. a Django shell:
 `ssh -t kanjikyoushi /srv/kanjikyoushi/phone/manage.sh shell`.
 
+## Loading passages (paragraph mode)
+
+`deploy.sh` doesn't ship `data/`, so passages go over separately. Build `passages.jsonl.gz` on the Mac with
+`build_passages` (see the main README), then load it into the phone's database. Loading only adds the passages,
+their sentences and any new words; it never replaces the database. `--replace` swaps out the previous passages.
+
+```bash
+scp backend/data/aozora/passages.jsonl.gz kanjikyoushi:/srv/kanjikyoushi/data/passages.jsonl.gz
+ssh kanjikyoushi chown 2900:2900 /srv/kanjikyoushi/data/passages.jsonl.gz
+ssh kanjikyoushi /srv/kanjikyoushi/phone/manage.sh load_passages /srv/kanjikyoushi/data/passages.jsonl.gz --replace
+```
+
 ## Backing up the database
 
 ```bash

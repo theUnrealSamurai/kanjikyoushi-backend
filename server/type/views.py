@@ -68,6 +68,22 @@ def mode(request):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 @transaction.atomic
+def paragraphs(request):
+    """Turn paragraph mode on or off and return the sentence for the new mode. It only turns on once unlocked."""
+    on = request.data.get('on')
+    if not isinstance(on, bool):
+        return Response({"error": "Expected 'on': true or false."}, status=400)
+    learner = get_learner(request)
+    try:
+        learner.set_paragraphs(on)
+    except ValueError as error:
+        return Response({"error": str(error)}, status=400)
+    return next_sentence_response(learner)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@transaction.atomic
 def due(request):
     return Response(get_learner(request).due_list())
 

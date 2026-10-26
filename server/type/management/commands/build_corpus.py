@@ -68,7 +68,8 @@ class Command(BaseCommand):
                             help="skip sentences with more than N katakana letters (names, loanwords); 0 = none")
         parser.add_argument("--limit", type=int, help="stop after loading this many sentences")
         parser.add_argument("--replace", action="store_true",
-                            help="delete existing sentences first (learners' progress is kept)")
+                            help="delete existing standalone sentences first (learners' progress is kept; "
+                                 "sentences that are in passages stay, but only as passage text)")
 
     def handle(self, path, text_column, translation_column, min_length, max_length, min_score, score_column,
                sample, seed, joyo_only, max_katakana, limit, replace, **options):
@@ -77,7 +78,7 @@ class Command(BaseCommand):
         if sample is not None and not 0 < sample <= 1:
             raise CommandError("--sample must be a fraction between 0 and 1")
         if replace:
-            Sentence.objects.all().delete()
+            self.clear_standalone()
 
         rng = random.Random(seed)
 
@@ -117,6 +118,8 @@ class Command(BaseCommand):
     @transaction.atomic
     def load_batch(self, batch, word_ids, kana_ids):
         existing = set(Sentence.objects.filter(text__in=[text for text, _ in batch]).values_list("text", flat=True))
+        # A sentence that was only in passages is now part of the corpus too: sentence mode may serve it.
+        promoted = Sentence.objects.filter(text__in=existing, standalone=False).update(standalone=True) if existing else 0
         rows = []
         for text, translation in batch:
             if text in existing:
@@ -159,7 +162,14 @@ class Command(BaseCommand):
             for sentence in sentences
             for word_id in {token[2] for token in sentence.tokens if token[2]}
         ])
-        return len(sentences)
+        return len(sentences) + promoted
+
+    def clear_standalone(self):
+        """--replace: drop the sentence-mode corpus without touching passages. Standalone sentences that are in no
+        passage are deleted; the ones a passage uses stay (so its PassageSentence rows survive) as passage-only text."""
+        in_passage = Sentence.objects.filter(passages__isnull=False)
+        Sentence.objects.filter(id__in=in_passage.values("id")).update(standalone=False)
+        Sentence.objects.filter(standalone=True).delete()
 
     def add_meanings(self):
         """English meanings for words and kana words that have none yet, if the dictionary has already been downloaded."""
@@ -173,7 +183,7 @@ class Command(BaseCommand):
 
     def update_frequencies(self):
         counts = (
-            Sentence.words.through.objects.filter(word=OuterRef("pk"))
+            Sentence.words.through.objects.filter(word=OuterRef("pk"), sentence__standalone=True)  # passages teach nothing
             .order_by().values("word").annotate(n=Count("*")).values("n")
         )
         Word.objects.update(frequency=Coalesce(Subquery(counts), 0))

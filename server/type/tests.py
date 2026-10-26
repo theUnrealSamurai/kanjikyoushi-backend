@@ -279,6 +279,18 @@ class LearningFlowTests(TestCase):
         learner = self.onboard("雨")
         self.assertEqual(learner.words.get(word__text="雨").status, UserWord.KNOWN)
 
+    def test_repeat_marks_dont_make_a_word_new(self):
+        Word.objects.create(text="人々", reading="ひとびと", jlpt=5, frequency=1)
+        learner = self.onboard("人日時")
+        self.assertEqual(learner.words.get(word__text="人々").status, UserWord.KNOWN)  # 々 isn't a kanji to know
+        # Words met later (added to the corpus, or left unmet by an older onboarding) become known on the way.
+        days = Word.objects.create(text="日々", reading="ひび", jlpt=5, frequency=99)  # first in the learning order
+        self.assertNotIn(days.id, learner._new_word_window())
+        self.assertEqual(learner.words.get(word=days).status, UserWord.KNOWN)
+        times = Word.objects.create(text="時々", reading="ときどき", jlpt=5, frequency=99)
+        learner._fill_learning_pool()
+        self.assertEqual(learner.words.get(word=times).status, UserWord.KNOWN)
+
     def test_new_words_come_in_jlpt_order_then_by_frequency(self):
         learner = self.onboard()
         learner.words.all().delete()
@@ -359,8 +371,9 @@ class LearningFlowTests(TestCase):
                          {"kanji", "on_readings", "kun_readings", "meanings"})
         self.assertEqual(
             set(payload),
-            {"sentence_id", "text", "translation", "romaji", "tokens", "words", "kana_words", "extra_words", "stats"},
+            {"sentence_id", "text", "translation", "romaji", "tokens", "words", "kana_words", "extra_words", "stats", "passage"},
         )
+        self.assertIsNone(payload["passage"])  # sentence mode
 
     def test_skipped_review_words_are_not_graded(self):
         learner = self.onboard()
