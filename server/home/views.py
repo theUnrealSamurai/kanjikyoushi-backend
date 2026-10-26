@@ -2,9 +2,11 @@ from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from rest_framework import status
 from rest_framework.response import Response
+from rest_framework.throttling import AnonRateThrottle, ScopedRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from .serializers import LoginSerializer, SignUpSerializer
+from .throttles import LoginThrottle
 
 
 def token_response(user, status_code):
@@ -22,6 +24,7 @@ def token_response(user, status_code):
 
 class LoginView(APIView):
     authentication_classes = []
+    throttle_classes = [AnonRateThrottle, LoginThrottle]
 
     def post(self, request):
         serializer = LoginSerializer(data=request.data)
@@ -41,6 +44,8 @@ class LoginView(APIView):
 
 class SignUpView(APIView):
     authentication_classes = []
+    throttle_classes = [AnonRateThrottle, ScopedRateThrottle]
+    throttle_scope = "signup"
 
     def post(self, request):
         serializer = SignUpSerializer(data=request.data)

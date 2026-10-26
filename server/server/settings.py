@@ -94,7 +94,8 @@ else:
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': BASE_DIR / 'db.sqlite3',
+            # Deploys replace the code folder, so a server keeps its database elsewhere.
+            'NAME': os.environ.get("DJANGO_SQLITE_PATH") or BASE_DIR / 'db.sqlite3',
             # Take the write lock when a transaction starts, so concurrent requests wait instead of failing.
             'OPTIONS': {'transaction_mode': 'IMMEDIATE', 'timeout': 20},
         }
@@ -121,7 +122,28 @@ REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
+    'DEFAULT_THROTTLE_CLASSES': (
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.UserRateThrottle',
+    ),
+    'DEFAULT_THROTTLE_RATES': {
+        'anon': '60/min',
+        'user': '300/min',
+        'login': '10/hour',   # per account name, see home/throttles.py
+        'signup': '5/hour',   # per IP
+    },
+    # How many proxies sit in front of Django and add to X-Forwarded-For, so throttles see the real client IP.
+    'NUM_PROXIES': int(os.environ["DJANGO_NUM_PROXIES"]) if os.environ.get("DJANGO_NUM_PROXIES") else None,
 }
+
+# Throttle counters live in the cache. Several gunicorn workers need a shared one, or each counts on its own.
+if os.environ.get("DJANGO_CACHE_DIR"):
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
+            'LOCATION': os.environ["DJANGO_CACHE_DIR"],
+        }
+    }
 
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(days=7),
