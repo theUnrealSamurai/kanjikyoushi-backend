@@ -11,6 +11,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from type.corpus import jlpt_level
+from type.jlpt_list import apply_list_levels
 from type.models import KanaWord, Passage, PassageSentence, Sentence, Word
 
 
@@ -85,6 +86,7 @@ class Command(BaseCommand):
                 self.stdout.write(f"  {totals['passages']} passages loaded ({totals['sentences_new']} new sentences)")
         if batch:
             self.load_batch(batch, word_ids, kana_ids, sentence_ids, totals)
+        apply_list_levels(Word)  # new words get their level on the JLPT list
 
         self.stdout.write(self.style.SUCCESS(
             f"Loaded {totals['passages']} passages ({totals['skipped']} already there). "

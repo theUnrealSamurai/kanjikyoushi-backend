@@ -10,6 +10,7 @@ from django.db.models.functions import Coalesce
 
 from type.corpus import is_joyo_only, jlpt_level, katakana_count, romaji, strip_invisible, tokenize
 from type.dictionary import cached_dictionary, fill_meanings
+from type.jlpt_list import apply_list_levels
 from type.models import KanaWord, Sentence, Word
 
 
@@ -110,6 +111,7 @@ class Command(BaseCommand):
 
         self.update_frequencies()
         self.add_meanings()
+        apply_list_levels(Word)  # only words on the JLPT list are taught
         self.stdout.write(self.style.SUCCESS(
             f"Loaded {loaded} sentences. Corpus now has {Sentence.objects.count()} sentences "
             f"and {Word.objects.filter(frequency__gt=0).count()} words."

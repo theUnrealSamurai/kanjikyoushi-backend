@@ -13,25 +13,29 @@ The frontend lives in [kanjikyoushi-frontend](https://github.com/theUnrealSamura
   [JMdict](https://github.com/scriptin/jmdict-simplified), matching on text and reading.
 - **The unit is the word**, keyed by text and reading (方/ほう and 方/かた are different words). Names
   and numbers get furigana but are never graded.
-- **Learning.** New words are taken in JLPT order (N5 first; a word is as hard as its hardest kanji), most
-  frequent first within a level, five at a time. Each is typed 3 times with
-  furigana showing, then gets an [FSRS](https://github.com/open-spaced-repetition/py-fsrs) card.
-- **Reviews happen while typing.** Each sentence grades up to 2 due words, with their furigana hidden:
+- **Only the JLPT vocabulary list is taught** (see "Vocabulary list" below). Every other word is treated like a
+  name: furigana and a Tab card, never taught or graded.
+- **Learning.** New words are taken in the list's level order (N5 first, then N4, N3, N2, and N1 last), most
+  frequent first within a level, ten at a time. The first time, a new word is a test with its furigana
+  hidden: typed without help, you already know it, so it gets its
+  [FSRS](https://github.com/open-spaced-repetition/py-fsrs) card straight away. Otherwise it's typed 3 times
+  in all with furigana showing, then gets its card.
+- **Reviews happen while typing.** Each sentence grades every due word in it, with their furigana hidden:
   - typed without help → Good
-  - needed Tab to see the reading → Hard
-  - typed the wrong kanji → Again
+  - needed Tab (or help mode) to see the reading → Hard
+  - typos never count
 - **Review mode.** New words only come in while "learn new" is on. With it off, only due words are
   targeted and the warm-up words are left alone, and when nothing is due you are done. The app nudges you
   to clear your due words before learning more.
-- **Picking sentences.** The next sentence is the one that covers the most due and new words while
-  containing the fewest words you haven't been taught yet. Sentence mode only serves standalone sentences,
+- **Picking sentences.** The next sentence is the one that covers the most due words and new words (up to 2
+  new words a sentence, `NEW_PER_SENTENCE`) while containing the fewest words you haven't been taught yet. Sentence mode only serves standalone sentences,
   never lines that exist only inside a passage.
 - **Paragraph mode.** Unlocks once every N5 kanji is covered: known at onboarding, or in a word you know or
   have learned. You then type a whole passage (an Aozora Bunko paragraph) one line at a time, with the passage
-  shown around the line. A passage carries several words at once: up to 8 due words (from the 30 most overdue)
-  and up to 5 new ones, your warm-up words first, then words from the next 40 in the learning order, which it
-  brings in (so new words stay in JLPT order, roughly). A passage is only picked when you have met at least 60%
-  of its words (`PASSAGE_COVERAGE`); the rest, including those 40 until they're brought in, are shown with
+  shown around the line. A passage carries several words at once: every due word in it (passages are looked
+  for around the 30 most overdue) and up to 5 new ones, at most 2 on a line, your warm-up words first, then
+  words from the next 40 in the learning order, which it brings in (so new words stay in list order, roughly).
+  A passage is only picked when you have met at least 60% of its list words (`PASSAGE_COVERAGE`); the rest, including those 40 until they're brought in, are shown with
   furigana and never graded. Due words come first: while any are due, every passage has 2 of them when any
   candidate does (else 1). While learning new words, every passage also has at least 1 new word, and 2 when any
   candidate left does; in review mode it brings in nothing new. Among those, the passage with the most due and
@@ -133,6 +137,16 @@ are already loaded. `--replace` deletes the source's passages first, then the pa
 It never changes an existing word's frequency, and word frequencies count standalone sentences only
 (`build_corpus` too), so a word that only appears in passages is never taught: it shows as unseen, with furigana.
 `build_corpus --replace` deletes only standalone sentences that are in no passage.
+
+## Vocabulary list
+
+`assets/jlpt_vocab/` holds the JLPT vocabulary lists that decide what is taught: **JLPT vocabulary lists by
+Jonathan Waller, tanos.co.uk, CC BY**, as CSVs from jamsinclair/open-anki-jlpt-decks (MIT); see the README
+there. `type/jlpt_list.py` matches each entry to a Word by text and reading and stores its level in
+`Word.list_level`; words that match nothing get none and are never taught. `build_corpus` and `load_passages`
+do this for the words they add, and `uv run python manage.py load_jlpt_list` redoes it for every word.
+Entries written only in kana (嘘, 嬉しい) and ones the tokenizer splits up (お金, 映画館) have no Word, so they
+aren't taught.
 
 ## Configuration
 

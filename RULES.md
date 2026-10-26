@@ -7,23 +7,23 @@ Rules for anyone (human or AI) working on KanjiKyoushi, compiled from the owner'
 - No AI anywhere. All logic is deterministic and all text is human-written. Never add LLM-generated or LLM-simplified corpora, model-based difficulty scoring, or other AI features.
 - Formula-based scoring (e.g. jReadability) is acceptable because it is not a model.
 - The site is free and ad-free. Keep it that way, and keep the "no AI" promise loud on the home page.
-- Kanji and words are taught in clean JLPT order (N5 first). A word is as hard as its hardest kanji. Keep this guaranteed in the logic.
+- Only words on the JLPT vocabulary list (Jonathan Waller's Tanos lists, CC BY; `assets/jlpt_vocab`) are taught, in the list's level order: N5 to N2 first, then N1, most frequent first within a level. Every other word is out (owner, 2026-10-26: "nuke every other word that's not in the official list"): never taught, reviewed or graded, shown with furigana and a Tab card like a name. This replaced the old "a word is as hard as its hardest kanji" order.
 - Corpus sources must be human-written text with a licence that permits this use. Check source and licence before the site goes public. Excluded: NHK News Web Easy (copyrighted), JParaCrawl and JESC (research-only), BCCWJ (paid).
 - Preferred sources, per PLAN-paragraph-mode.md: Aozora Bunko (cleaned) for paragraphs, Aozora difficulty scores to rank works easiest first, SNOW T15/T23 and Tatoeba for sentence mode.
 - Paragraph mode: type one sentence at a time with the whole paragraph shown around it (bigger paragraphs are better), keeping unlearned words to a minimum.
   - It unlocks once all 109 N5 kanji are covered (known at onboarding or in a learned word). A "Paragraphs" switch in the practice header turns it on; while locked it shows N5 progress.
-  - One paragraph for one word is wasteful: every passage should carry several new words (up to 5, at least 2 when available) and several due words. New words for passages come from the next ~40 words in the learning order, so the order stays roughly JLPT.
+  - One paragraph for one word is wasteful: every passage should carry several new words (up to 5, at least 2 when available, at most 2 on a line) and every due word in it. New words for passages come from the next ~40 words in the learning order, so the order stays roughly JLPT.
   - Due first: while you have due words, every passage includes them (at least 2 when available); new words come on top.
-  - Never serve a passage where under 60% of its words are known. Unknown words show furigana and aren't graded. If nothing qualifies, practice falls back to single sentences.
+  - Never serve a passage where under 60% of its list words are known (words off the list don't count). Unknown words show furigana and aren't graded. If nothing qualifies, practice falls back to single sentences.
   - Passage text comes from Aozora Bunko (modern spelling, public domain, via the CC BY 4.0 aozorabunko-clean dataset): jōyō kanji only, so everything is typable with an IME, with no ellipses (… ‥), no archaic style, no markup and no very long sentences. Credit the title, author and Aozora Bunko on screen.
   - Passage-only sentences never appear in sentence mode, and words that only occur in passages are never queued for learning.
-- Sentences and paragraphs should carry more review words each. Raise the per-sentence review and due-target limits as described in the plan.
+- Max out every sentence: it grades every due word in it. While learning, a sentence grades up to 2 new words and sentences with 2 are preferred (10 words warm up at a time, so most sentences can have 2).
 
 ## Learning and review behaviour
 
 - The word is the unit, keyed by text and reading. Names and numbers show furigana but are never graded.
 - The repeat marks 々〆ヶ aren't kanji to learn: a word like 人々 counts as known once 人 is known.
-- New words get a warm-up (typed with furigana showing), then an FSRS card. Trust FSRS scheduling; there are no flashcards to rate.
+- A new word's first sighting is a test, with furigana hidden: typed without help (no Tab, help mode or ⌥Tab), it skips the warm-up and gets its FSRS card straight away. Otherwise it gets the warm-up (3 typings in all, furigana showing), then an FSRS card. Trust FSRS scheduling; there are no flashcards to rate.
 - Reviews are graded only by whether you needed the reading: no help is Good, needing Tab (or help mode) for the reading is Hard. Typos never count.
 - Due words are typed with furigana hidden.
 - Sentence picking prefers the sentence covering the most due words (a sentence with 4 due words beats one with 2), while containing as few not-yet-taught words as possible.
@@ -78,5 +78,6 @@ Rules for anyone (human or AI) working on KanjiKyoushi, compiled from the owner'
 - The practice page falls back to the browser's built-in translator for sentences with no translation, which is an on-device ML model. The owner chose to keep it, in paragraph mode too (2026-10-26), but the home page's "no AI anywhere" claim isn't strictly true while it stays.
 - The current 1M-sentence corpus has an unknown source and licence. Verify before the site goes public.
 - Permission to use the Tadoku graded readers (CC BY-NC-ND) must be requested before using them.
-- The code still grades at most 2 due words per sentence (`REVIEWS_PER_SENTENCE`) and targets the 6 most overdue (`DUE_TARGETS`), so a sentence with 4 due words scores the same as one with 2. Raising them (the plan proposes 4 and 12) is needed to follow the sentence-picking rule above; not done yet.
+- List words written only in kana (about 800, e.g. 嘘, 嬉しい) and ones the tokenizer splits (お金, 映画館) can't be taught yet.
+- The vocabulary list's CC BY credit is in the repo (`assets/jlpt_vocab/README.md`, backend README); whether to show it on the site too wasn't decided.
 - How the Tab key on a grey (not-yet-carded) word should behave during onboarding was asked about and not recorded as a decision.

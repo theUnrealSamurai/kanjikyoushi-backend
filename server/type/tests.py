@@ -323,44 +323,79 @@ class LearningFlowTests(TestCase):
         self.assertEqual(learner.words.get(word__text="雨").status, UserWord.KNOWN)
 
     def test_repeat_marks_dont_make_a_word_new(self):
-        Word.objects.create(text="人々", reading="ひとびと", jlpt=5, frequency=1)
+        Word.objects.create(text="人々", reading="ひとびと", jlpt=5, list_level=5, frequency=1)
         learner = self.onboard("人日時")
         self.assertEqual(learner.words.get(word__text="人々").status, UserWord.KNOWN)  # 々 isn't a kanji to know
         # Words met later (added to the corpus, or left unmet by an older onboarding) become known on the way.
-        days = Word.objects.create(text="日々", reading="ひび", jlpt=5, frequency=99)  # first in the learning order
+        days = Word.objects.create(text="日々", reading="ひび", jlpt=5, list_level=5, frequency=99)  # first in the learning order
         self.assertNotIn(days.id, learner._new_word_window())
         self.assertEqual(learner.words.get(word=days).status, UserWord.KNOWN)
-        times = Word.objects.create(text="時々", reading="ときどき", jlpt=5, frequency=99)
+        times = Word.objects.create(text="時々", reading="ときどき", jlpt=5, list_level=5, frequency=99)
         learner._fill_learning_pool()
         self.assertEqual(learner.words.get(word=times).status, UserWord.KNOWN)
 
-    def test_new_words_come_in_jlpt_order_then_by_frequency(self):
+    def test_new_words_come_in_list_order_then_by_frequency_and_only_from_the_list(self):
         learner = self.onboard()
         learner.words.all().delete()
         Word.objects.update(frequency=0)  # leave only the words below in play
-        for text, reading, jlpt, frequency in [
-            ("剣", "けん", 1, 900), ("魔物", "まもの", 1, 800), ("侏儒", "しゅじゅ", 0, 999),
-            ("部屋", "へや", 3, 50), ("頭", "あたま", 3, 70), ("持つ", "もつ", 4, 20), ("犬", "いぬ", 5, 10),
+        for text, reading, level, frequency in [
+            ("剣", "けん", 1, 900), ("剣士", "けんし", 1, 100), ("魔物", "まもの", None, 999), ("侏儒", "しゅじゅ", None, 999),
+            ("部屋", "へや", 5, 50), ("頭", "あたま", 4, 70), ("持つ", "もつ", 4, 20), ("犬", "いぬ", 5, 10),
         ]:
-            Word.objects.create(text=text, reading=reading, jlpt=jlpt, frequency=frequency)
+            Word.objects.create(text=text, reading=reading, jlpt=3, list_level=level, frequency=frequency)
 
-        learner._fill_learning_pool()
+        with patch.object(models, "LEARNING_POOL", 5):
+            learner._fill_learning_pool()
         pool = set(learner.words.filter(status=UserWord.LEARNING).values_list("word__text", flat=True))
-        self.assertEqual(pool, {"犬", "持つ", "頭", "部屋", "剣"})  # 剣 beats 魔物 on frequency; 侏儒 comes last
+        self.assertEqual(pool, {"部屋", "犬", "頭", "持つ", "剣"})  # 剣 beats 剣士 on frequency
+        learner.words.all().delete()
+        for _ in range(3):
+            learner._fill_learning_pool()
+            learner.words.filter(status=UserWord.LEARNING).update(status=UserWord.REVIEW)
+        self.assertFalse(learner.words.filter(word__text__in=("魔物", "侏儒")).exists())  # not on the list: never taught
 
     def test_new_words_warm_up_then_get_reviewed(self):
         self.onboard()
         payload = self.next()
-        self.assertTrue(self.word_ids(payload, "learning"))
+        self.assertTrue(self.word_ids(payload, "test"))
 
         for _ in range(30):
-            response = self.submit(payload)
+            response = self.submit(payload, revealed=self.word_ids(payload, "test"))  # every test needs Tab: full warm-up
             self.assertEqual(response.status_code, 200)
             payload = response.json()
             if payload.get("done"):
                 break
         learner = Learner.objects.get(user=self.user)
         self.assertTrue(learner.words.filter(status=UserWord.REVIEW, sightings__gte=WARMUP_SIGHTINGS).exists())
+
+    def test_a_new_word_typed_without_help_skips_the_warm_up(self):
+        learner = self.onboard()
+        payload = self.next()
+        tested = list(dict.fromkeys(self.word_ids(payload, "test")))
+        self.assertTrue(tested)
+        self.assertEqual(self.word_ids(payload, "learning"), [])  # every new word starts with its test
+        self.assertEqual(self.submit(payload, revealed=tested[1:]).status_code, 200)
+
+        passed = learner.words.get(word_id=tested[0])
+        self.assertEqual((passed.status, passed.sightings), (UserWord.REVIEW, 1))
+        self.assertIsNotNone(passed.card)
+        self.assertIsNotNone(passed.learned_at)
+        for word_id in tested[1:]:  # Tab on the test: the warm-up goes on
+            self.assertEqual(learner.words.get(word_id=word_id).sightings, 1)
+
+    def test_needing_help_on_the_test_means_the_warm_up_with_furigana(self):
+        learner = self.onboard()
+        payload = self.next()
+        word_id = self.word_ids(payload, "test")[0]
+        self.submit(payload, skipped=[word_id])  # ⌥Tab showed how to type it
+        self.assertEqual((learner.words.get(word_id=word_id).status, learner.words.get(word_id=word_id).sightings),
+                         (UserWord.LEARNING, 1))
+
+        sentence = Sentence.objects.filter(words=word_id).first()
+        learner.refresh_from_db()
+        learner.current = {"sentence": sentence.id, "review": [], "learning": [word_id]}
+        roles = {t["word"]: t["role"] for t in learner.sentence_payload(sentence, {})["tokens"]}
+        self.assertEqual(roles[word_id], "learning")  # furigana shown from now on
 
     def test_review_ratings_come_from_tab_only_never_typos(self):
         learner = self.onboard()
@@ -401,7 +436,7 @@ class LearningFlowTests(TestCase):
         payload = self.next()
         self.assertNotIn("kanji", payload)
         self.assertEqual(self.word_ids(payload, "review"), [teacher.id])
-        self.assertEqual(self.word_ids(payload, "learning"), [meeting.id])
+        self.assertEqual(self.word_ids(payload, "test"), [meeting.id])  # a new word's first sighting is its test
         with_cards = {str(t["word"]) for t in payload["tokens"] if t["word"]}
         self.assertEqual(set(payload["words"]), with_cards)  # string keys; every word, so Tab can open any of them
         self.assertTrue({str(teacher.id), str(meeting.id)} <= set(payload["words"]))
@@ -463,6 +498,7 @@ class LearningFlowTests(TestCase):
 
         self.assertEqual(self.submit(payload, revealed=[meeting.id, known, elsewhere.id]).status_code, 200)
         self.assertEqual(learner.words.get(word_id=known).status, UserWord.LEARNING)  # back to the warm-up
+        self.assertEqual(learner.words.get(word_id=known).sightings, 1)  # the look-up was its first sighting: no test
         self.assertLess(learner.words.get(word_id=meeting.id).due, later)  # reviewed as Hard: comes back sooner
         self.assertEqual(learner.words.get(word_id=elsewhere.id).status, UserWord.KNOWN)  # not in the sentence
 
@@ -527,6 +563,45 @@ class LearningFlowTests(TestCase):
     def set_mode(self, learn_new):
         return self.client.post("/type/mode", {"learn_new": learn_new}, format="json")
 
+    def test_a_sentence_grades_every_due_word_in_it(self):
+        learner = self.onboard()
+        self.give_due(learner, {"今日": 1, "先生": 2, "会議": 3})
+        payload = self.set_mode(False).json()
+        self.assertEqual(payload["text"], "今日は先生と会議があります。")  # the one sentence with all three
+        due = set(Word.objects.filter(text__in=("今日", "先生", "会議")).values_list("id", flat=True))
+        self.assertEqual(set(self.word_ids(payload, "review")), due)
+        self.submit(payload)
+        self.assertEqual(set(ReviewLog.objects.filter(learner=learner).values_list("word_id", flat=True)), due)
+
+    def test_a_sentence_grades_at_most_two_new_words(self):
+        learner = self.onboard()
+        learner.words.all().delete()
+        UserWord.objects.bulk_create(
+            UserWord(learner=learner, word=word, status=UserWord.LEARNING if word.text in ("今日", "先生", "会議") else UserWord.KNOWN)
+            for word in Word.objects.all()
+        )
+        payload = self.next()
+        self.assertEqual(len(set(self.word_ids(payload, "test"))), 2)  # a sentence with two of them wins
+        self.submit(payload)
+        self.assertEqual(learner.words.filter(status=UserWord.REVIEW).count(), 2)  # both passed their test
+
+    def test_migration_drops_progress_on_words_off_the_list(self):
+        teach_the_list = importlib.import_module("type.migrations.0010_teach_the_list").teach_the_list
+        learner = self.onboard()
+        monster = Word.objects.create(text="魔物", reading="まもの", frequency=5)
+        teacher = Word.objects.get(text="先生")
+        UserWord.objects.create(learner=learner, word=monster, status=UserWord.REVIEW)
+        UserWord.objects.update_or_create(learner=learner, word=teacher, defaults={"status": UserWord.REVIEW})
+        learner.current = {"sentence": Sentence.objects.first().id, "review": [monster.id], "learning": []}
+        learner.save()
+
+        teach_the_list(apps, None)
+        learner.refresh_from_db()
+        self.assertEqual((Word.objects.get(id=monster.id).list_level, Word.objects.get(id=teacher.id).list_level), (None, 5))
+        self.assertFalse(learner.words.filter(word=monster).exists())  # never reviewed or taught again
+        self.assertTrue(learner.words.filter(word=teacher).exists())
+        self.assertEqual(learner.current, {})
+
     def test_review_mode_brings_in_no_new_words_and_grades_only_due_words(self):
         learner = self.onboard()
         self.give_due(learner, {"先生": 1})
@@ -561,7 +636,7 @@ class LearningFlowTests(TestCase):
 
         payload = self.set_mode(True).json()
         self.assertTrue(payload["stats"]["learn_new"])
-        self.assertTrue(self.word_ids(payload, "learning"))
+        self.assertTrue(self.word_ids(payload, "test"))
 
     def test_switching_mode_drops_the_pending_sentence(self):
         learner = self.onboard()
@@ -638,7 +713,7 @@ class LearningFlowTests(TestCase):
             payload = self.next()
             if payload.get("done"):
                 break
-            self.assertTrue(self.word_ids(payload, "learning"), payload["text"])
+            self.assertTrue(self.word_ids(payload, "learning") + self.word_ids(payload, "test"), payload["text"])
             self.assertEqual(self.submit(payload).status_code, 200)
             served += 1
         self.assertGreaterEqual(served, 3)

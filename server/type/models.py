@@ -17,10 +17,10 @@ from .corpus import KANJI_RE, furigana, has_kanji, jlpt_kanji, kanji_dictionary,
 scheduler = Scheduler()
 
 DEFAULT_KNOWN_KANJI = "一二三四五六七八九十百千万"
-LEARNING_POOL = 5           # new words being warmed up at any one time
-WARMUP_SIGHTINGS = 3        # a new word is typed this many times (with furigana) before reviews start
-REVIEWS_PER_SENTENCE = 2    # at most this many due words are graded in one sentence
-DUE_TARGETS = 6             # how many of the most overdue words to look for sentences for
+LEARNING_POOL = 10          # new words being warmed up at any one time: enough for most sentences to hold NEW_PER_SENTENCE
+WARMUP_SIGHTINGS = 3        # a new word is typed this many times (with furigana) before reviews start, unless it passes its test
+NEW_PER_SENTENCE = 2        # at most this many new words are graded in one sentence (or passage line); every due word is
+DUE_TARGETS = 12            # how many of the most overdue words to look for sentences for
 CANDIDATES_PER_WORD = 200   # sentences sampled per target word when picking the next sentence
 RECENT_SENTENCES = 50       # don't repeat a sentence typed this recently
 DUE_LIST_LIMIT = 300        # most words the due list shows (the kanji list and the totals cover all due words)
@@ -33,15 +33,39 @@ NEW_WORD_WINDOW = 40        # paragraph mode's new words come from the next this
 NEW_PER_PASSAGE = 5         # at most this many new words are graded in one passage: warm-up words first, then window words
 MIN_DUE_PER_PASSAGE = 2     # due words first: a passage needs this many if any candidate has them (else 1 if any has 1)
 MIN_NEW_PER_PASSAGE = 2     # while learning, then this many new words if any candidate left has them (always at least 1)
-REVIEWS_PER_PASSAGE = 8     # at most this many due words are graded in one passage, most overdue first
 PASSAGE_SHORTLIST = 3000    # the passages with the most target words get their coverage checked when picking one
 PASSAGE_COVERAGE = 0.60     # minimum share of a passage's graded words the learner knows, is learning or has learned
-PASSAGE_TARGET_WEIGHT = 6   # score points per due or new word a passage grades (up to 8 due + 5 new)
+PASSAGE_TARGET_WEIGHT = 6   # score points per due or new word a passage grades (every due word, up to 5 new)
 PASSAGE_COVERAGE_WEIGHT = 40  # score points for that share. Over the 60-100% a passage can have that is at most 16, so
                               # 3 more target words (18) always win, while 20% more coverage (8) beats 1 more word (6)
 PASSAGE_LENGTH_BONUS = 10   # each line of a passage scores a point, up to this many (so at most 9 apart): bigger is better
 RECENT_PASSAGES = 50        # don't repeat a passage finished this recently
 SOURCE_NAMES = {"aozora": "Aozora Bunko"}  # Passage.source -> the name in the credit line
+
+
+def line_targets(words, targets, assigned):
+    """(review, learning): the targets a passage line grades, from the word ids in it (`words`), the passage's
+    {"review", "learning"} targets and the ones earlier lines took (`assigned`). A line grades every target in it
+    that no earlier line took, so each is graded once, on its first line, but at most NEW_PER_SENTENCE new words:
+    one beyond that waits for its next line."""
+    free = words - set(assigned)
+    return [w for w in targets["review"] if w in free], [w for w in targets["learning"] if w in free][:NEW_PER_SENTENCE]
+
+
+def passage_line_words(passage_id):
+    """The word ids in each line of the passage, in order."""
+    lines = defaultdict(set)
+    for position, word_id in PassageSentence.objects.filter(passage_id=passage_id).values_list("position", "sentence__words"):
+        lines[position] |= {word_id} - {None}
+    return [lines[position] for position in sorted(lines)]
+
+
+def graded_new_words(lines, new):
+    """The new words (in order) that a line will grade, as line_targets assigns them; the rest are dropped."""
+    assigned = []
+    for words in lines:
+        assigned += line_targets(words, {"review": [], "learning": new}, assigned)[1]
+    return [w for w in new if w in assigned]
 
 
 def made_of_known_kanji(text, known):
@@ -55,8 +79,9 @@ def n5_kanji():
     return frozenset(kanji for kanji, level in jlpt_kanji().items() if level == 5)
 
 
-def word_role(word_id, review, learning, statuses):
+def word_role(word_id, review, learning, statuses, testing=frozenset()):
     """A token's role: "review" (graded, furigana hidden until Tab), "learning" (new word, furigana shown),
+    "test" (a new word on its first sighting, furigana hidden until Tab: typed without help, it skips the warm-up),
     "unseen" (not taught yet, furigana shown), "known" (furigana hidden), None (kana/punctuation).
     A warm-up word that isn't graded here (review mode, or graded on an earlier line) counts as "unseen"."""
     if word_id is None:
@@ -64,20 +89,20 @@ def word_role(word_id, review, learning, statuses):
     if word_id in review:
         return "review"
     if word_id in learning:
-        return "learning"
+        return "test" if word_id in testing else "learning"
     if word_id not in statuses or statuses[word_id] == UserWord.LEARNING:
         return "unseen"
     return "known"
 
 
-def sentence_tokens(sentence, review, learning, statuses, kana_with_meanings):
+def sentence_tokens(sentence, review, learning, statuses, kana_with_meanings, testing=frozenset()):
     """The sentence's tokens for the typing page: furigana pairs, the role of each word (see word_role) and, for a
     kana-only word with a meaning (an id in kana_with_meanings), its lookup id for Tab."""
     tokens = [
         {
             "text": surface,
             "word": word_id,
-            "role": word_role(word_id, review, learning, statuses),
+            "role": word_role(word_id, review, learning, statuses, testing),
             "ruby": furigana(surface, reading),
             "lookup": rest[0] if rest and rest[0] in kana_with_meanings else None,
         }
@@ -132,17 +157,19 @@ def passage_hits(word_ids):
 
 
 def passage_sizes(learner_id, passage_ids):
-    """{passage id: (lines, distinct words, words the learner has met)}, counted by the database.
+    """{passage id: (lines, distinct list words, list words the learner has met)}, counted by the database.
+    Only words on the JLPT list count: the others are never taught, so they're like names.
     Raw SQL for the same reason as passage_hits: ~30 ms for 3,000 passages against ~160 ms through the ORM."""
     if not passage_ids:
         return {}
     marks = ", ".join(["%s"] * len(passage_ids))
     with connection.cursor() as cursor:
         cursor.execute(
-            f"SELECT ps.passage_id, COUNT(DISTINCT ps.id), COUNT(DISTINCT sw.word_id), COUNT(DISTINCT uw.word_id) "
+            f"SELECT ps.passage_id, COUNT(DISTINCT ps.id), COUNT(DISTINCT w.id), COUNT(DISTINCT uw.word_id) "
             f"FROM {PassageSentence._meta.db_table} ps "
             f"LEFT JOIN {Sentence.words.through._meta.db_table} sw ON sw.sentence_id = ps.sentence_id "
-            f"LEFT JOIN {UserWord._meta.db_table} uw ON uw.word_id = sw.word_id AND uw.learner_id = %s "
+            f"LEFT JOIN {Word._meta.db_table} w ON w.id = sw.word_id AND w.list_level IS NOT NULL "
+            f"LEFT JOIN {UserWord._meta.db_table} uw ON uw.word_id = w.id AND uw.learner_id = %s "
             f"WHERE ps.passage_id IN ({marks}) GROUP BY ps.passage_id",
             [learner_id, *passage_ids],
         )
@@ -167,7 +194,10 @@ class Word(models.Model):
     text = models.CharField(max_length=64)
     reading = models.CharField(max_length=128)
     frequency = models.PositiveIntegerField(default=0, db_index=True)  # sentences using it; orders words within a level
-    jlpt = models.PositiveSmallIntegerField(default=0)  # hardest kanji: 5 = N5 ... 1 = N1, 0 = beyond; sets the learning order
+    jlpt = models.PositiveSmallIntegerField(default=0)  # hardest kanji: 5 = N5 ... 1 = N1, 0 = beyond
+    # Level on the JLPT vocabulary list (assets/jlpt_vocab: 5 = N5 ... 1 = N1); sets the learning order.
+    # None: not on the list, so never taught or graded (like a name: furigana and a Tab card only).
+    list_level = models.PositiveSmallIntegerField(null=True, blank=True)
     meanings = models.JSONField(default=list, blank=True)  # English, one string per sense (up to 3), from JMdict
 
     class Meta:
@@ -258,8 +288,8 @@ class Learner(models.Model):
 
     def onboard(self, kanji_list):
         """Store the kanji the user can already read and start their progress from scratch (sentence mode,
-        learning new words). Every word written only with those kanji (repeat marks like 々 aside) is marked known, so
-        it is never taught or graded."""
+        learning new words). Every list word written only with those kanji (repeat marks like 々 aside) is marked
+        known, so it is never taught or graded. Words not on the JLPT list never get a row: they're never taught."""
         known = "".join(dict.fromkeys(KANJI_RE.findall((kanji_list or "") + DEFAULT_KNOWN_KANJI)))
         self.words.all().delete()
         self.reviews.all().delete()
@@ -275,7 +305,7 @@ class Learner(models.Model):
         UserWord.objects.bulk_create(
             [
                 UserWord(learner=self, word_id=word_id, status=UserWord.KNOWN)
-                for word_id, text in Word.objects.values_list("id", "text").iterator()
+                for word_id, text in Word.objects.filter(list_level__isnull=False).values_list("id", "text").iterator()
                 if made_of_known_kanji(text, known_set)
             ],
             batch_size=1000,
@@ -514,8 +544,9 @@ class Learner(models.Model):
 
         if self.learn_new:
             self._fill_learning_pool()
-        due = list(self.due_words().values_list("word_id", flat=True)[:DUE_TARGETS])
-        learning = list(self.words.filter(status=UserWord.LEARNING).values_list("word_id", flat=True)) if self.learn_new else []
+        due = list(self.due_words().values_list("word_id", flat=True))  # most overdue first
+        learning = list(self.words.filter(status=UserWord.LEARNING).order_by("-word__list_level", "-word__frequency", "word_id")
+                        .values_list("word_id", flat=True)) if self.learn_new else []
         if not due and not learning:
             return None
         statuses = dict(self.words.values_list("word_id", "status"))
@@ -526,14 +557,16 @@ class Learner(models.Model):
     def _pick_sentence(self, due, learning, statuses):
         """Pick a single sentence, set it as current and return it (None if no sentence has a target word).
 
+        due: every due word, most overdue first; sentences are looked for around the first DUE_TARGETS of them.
         The best sentence covers the most target words while containing as few never-seen words as possible.
-        While learning is on, every sentence has at least one warm-up word: only sentences containing one
-        are eligible (falling back to all candidates if somehow none do). Only standalone sentences are served:
-        passage-only lines would make no sense out of context.
+        A sentence grades every due word in it and up to NEW_PER_SENTENCE warm-up words (in the learning order),
+        so one with more of them scores higher. While learning is on, every sentence has at least one warm-up word:
+        only sentences containing one are eligible (falling back to all candidates if somehow none do). Only
+        standalone sentences are served: passage-only lines would make no sense out of context.
         """
         through = Sentence.words.through
         candidates = set()
-        for word_id in due + learning:
+        for word_id in due[:DUE_TARGETS] + learning:
             ids = list(
                 through.objects.filter(word_id=word_id, sentence__standalone=True).values_list("sentence_id", flat=True)[:5000]
             )
@@ -544,7 +577,7 @@ class Learner(models.Model):
         words_in = defaultdict(set)
         for sentence_id, word_id in through.objects.filter(sentence_id__in=candidates).values_list("sentence_id", "word_id"):
             words_in[sentence_id].add(word_id)
-        recent = set(self.recent)
+        recent, due_rank = set(self.recent), {word_id: rank for rank, word_id in enumerate(due)}
 
         pool = sorted(candidates)
         if learning:
@@ -553,10 +586,10 @@ class Learner(models.Model):
         best, best_score = None, None
         for sentence_id in random.sample(pool, len(pool)):
             words = words_in[sentence_id]
-            due_hits = [w for w in due if w in words][:REVIEWS_PER_SENTENCE]
-            learning_hits = [w for w in learning if w in words]
+            due_hits = sorted((w for w in words if w in due_rank), key=due_rank.get)
+            learning_hits = [w for w in learning if w in words][:NEW_PER_SENTENCE]
             unseen = sum(1 for w in words if w not in statuses)
-            score = 3 * len(due_hits) + 2 * min(len(learning_hits), 2) - 2 * unseen - 5 * (sentence_id in recent)
+            score = 3 * len(due_hits) + 2 * len(learning_hits) - 2 * unseen - 5 * (sentence_id in recent)
             if best_score is None or score > best_score:
                 best, best_score = (sentence_id, due_hits, learning_hits), score
 
@@ -575,8 +608,8 @@ class Learner(models.Model):
         come in JLPT order, roughly: from within the window. In review mode there are no new words.
         Every passage with a target word is a candidate (recently finished ones are skipped); the PASSAGE_SHORTLIST
         ranked first by the rules below get their coverage checked. Coverage is the share of a passage's distinct
-        graded words the learner has met (known, learning or learned); window words aren't met until they're brought
-        in, and unmet words show furigana ("unseen") and are never graded.
+        list words (the only ones ever graded) the learner has met (known, learning or learned); window words aren't
+        met until they're brought in, and unmet words show furigana ("unseen") and are never graded.
         Due words come first ("finish your due words before learning more"). The rules, in this order:
         (a) coverage of at least PASSAGE_COVERAGE;
         (b) while learning, at least one new word: every passage teaches something;
@@ -584,15 +617,16 @@ class Learner(models.Model):
         (d) while learning, MIN_NEW_PER_PASSAGE new words if any passage left has that many.
         Of the passages left, the best has the most target words, then the best coverage, then the most lines
         (see the weights' comments).
-        The chosen passage grades up to REVIEWS_PER_PASSAGE due words (any due word, most overdue first) and up to
-        NEW_PER_PASSAGE new words: warm-up words first, then window words in the learning order, which become
-        warm-up words now. Each target is graded once, on its first line.
+        The chosen passage grades every due word in it and up to NEW_PER_PASSAGE new words: warm-up words first,
+        then window words in the learning order, which become warm-up words now. Each target is graded once, on its
+        first line, with at most NEW_PER_SENTENCE new words on a line (see line_targets): a new word whose lines are
+        all full is left out.
         """
         due = list(self.due_words().values_list("word_id", flat=True))  # most overdue first
         learning, window = [], []
         if self.learn_new:
             learning = list(self.words.filter(status=UserWord.LEARNING)
-                            .order_by("-word__jlpt", "-word__frequency", "word_id").values_list("word_id", flat=True))
+                            .order_by("-word__list_level", "-word__frequency", "word_id").values_list("word_id", flat=True))
             window = self._new_word_window()
         due_rank = {word_id: rank for rank, word_id in enumerate(due)}
         new_rank = {word_id: rank for rank, word_id in enumerate(learning + window)}  # warm-up words first
@@ -606,8 +640,7 @@ class Learner(models.Model):
             if passage_id not in recent:
                 hits[passage_id].add(word_id)
         counts = {
-            passage_id: (min(sum(w in due_rank for w in words), REVIEWS_PER_PASSAGE),
-                         min(sum(w in new_rank for w in words), NEW_PER_PASSAGE))
+            passage_id: (sum(w in due_rank for w in words), min(sum(w in new_rank for w in words), NEW_PER_PASSAGE))
             for passage_id, words in hits.items()
         }
         # (b) first, as it needs no coverage; then rank as (c) and (d) will filter, so the shortlist has those passages.
@@ -637,9 +670,10 @@ class Learner(models.Model):
             return None
         passage_id = max(scored)[2]
 
-        words = set(PassageSentence.objects.filter(passage_id=passage_id).values_list("sentence__words", flat=True))
-        review = sorted((w for w in words if w in due_rank), key=due_rank.get)[:REVIEWS_PER_PASSAGE]
-        new = sorted((w for w in words if w in new_rank), key=new_rank.get)[:NEW_PER_PASSAGE]
+        lines = passage_line_words(passage_id)
+        words = set().union(*lines)
+        review = sorted((w for w in words if w in due_rank), key=due_rank.get)
+        new = graded_new_words(lines, sorted((w for w in words if w in new_rank), key=new_rank.get)[:NEW_PER_PASSAGE])
         warming_up = set(learning)
         UserWord.objects.bulk_create(
             [UserWord(learner=self, word_id=w, status=UserWord.LEARNING) for w in new if w not in warming_up],
@@ -668,16 +702,16 @@ class Learner(models.Model):
     def _passage_line(self, passage_id, index, targets, assigned):
         """The `current` for line `index` (0-based) of a passage, or None past its last line.
         targets: the passage's {"review", "learning"} word ids; assigned: the targets earlier lines took.
-        The line grades the targets it contains that no earlier line took, so each is graded once, on its first line."""
+        The line grades the targets it contains that no earlier line took (see line_targets)."""
         sentence_ids = list(PassageSentence.objects.filter(passage_id=passage_id).values_list("sentence_id", flat=True))
         if index >= len(sentence_ids):
             return None
         words = set(Sentence.words.through.objects.filter(sentence_id=sentence_ids[index]).values_list("word_id", flat=True))
-        free = words - set(assigned)
+        review, learning = line_targets(words, targets, assigned)
         return {
             "sentence": sentence_ids[index],
-            "review": [w for w in targets["review"] if w in free],
-            "learning": [w for w in targets["learning"] if w in free],
+            "review": review,
+            "learning": learning,
             "passage": passage_id,
             "index": index,
             "targets": targets,
@@ -708,7 +742,12 @@ class Learner(models.Model):
                            "meanings": kana[kana_id].meanings, "kanji": []}
             for kana_id in kana_ids(sentence) if kana_id in kana
         }
-        tokens = sentence_tokens(sentence, set(self.current["review"]), set(self.current["learning"]), statuses, kana)
+        # New words on their first sighting are tested: furigana hidden on every line until Tab (see submit).
+        testing = set(self.words.filter(
+            word_id__in=self.current["targets"]["learning"] if lines else self.current["learning"],
+            status=UserWord.LEARNING, sightings=0,
+        ).values_list("word_id", flat=True))
+        tokens = sentence_tokens(sentence, set(self.current["review"]), set(self.current["learning"]), statuses, kana, testing)
         extra_words = extra_cards(sentence, tokens)
         # Dictionary data for the page's cards; the keys are word ids as strings (JSON object keys).
         graded = {t["word"] for t in tokens if t["word"]}  # every word, so Tab can open the card of whichever comes next
@@ -731,11 +770,11 @@ class Learner(models.Model):
             "kana_words": kana_words,  # meanings for kana-only words, shown by Tab without any grading
             "extra_words": extra_words,  # names, numbers and counters, keyed by token "extra"; never graded
             "stats": self.stats(),
-            "passage": self._passage_view(lines, statuses, kana) if lines else None,
+            "passage": self._passage_view(lines, statuses, kana, testing) if lines else None,
         }
 
 
-    def _passage_view(self, lines, statuses, kana):
+    def _passage_view(self, lines, statuses, kana, testing):
         """The passage around the line being typed (lines: its PassageSentence rows, in order, with passage and
         sentence loaded). Roles in every line come from the passage's targets, as on the line where each is graded."""
         passage, targets = lines[0].passage, self.current["targets"]
@@ -752,7 +791,7 @@ class Learner(models.Model):
                 {
                     "sentence_id": line.sentence_id,
                     "text": line.sentence.text,
-                    "tokens": sentence_tokens(line.sentence, review, learning, statuses, kana),
+                    "tokens": sentence_tokens(line.sentence, review, learning, statuses, kana, testing),
                 }
                 for line in lines
             ],
@@ -766,8 +805,10 @@ class Learner(models.Model):
         Skipped review words (you asked how to type them: you know the reading, not the keystrokes) aren't
         graded at all and stay due, unless you had also revealed the reading.
         New words: count one more sighting; after WARMUP_SIGHTINGS they get an FSRS card and start reviews.
+        On its first sighting a new word is a test (furigana hidden): typed without help (no Tab, help mode or ⌥Tab),
+        you already know it, so it skips the rest of the warm-up and starts reviews now.
         Words you were assumed to know but looked up with Tab: a known word goes back to the warm-up
-        (furigana shown again), a learned word that wasn't due is reviewed as Hard.
+        (furigana shown again; the look-up was its first sighting), a learned word that wasn't due is reviewed as Hard.
         On a passage line, the next line becomes current; after the last line the passage joins recent_passages
         and the next call picks a new one.
         """
@@ -788,8 +829,9 @@ class Learner(models.Model):
                 user_word.review(rating, now)
                 logs.append(ReviewLog(learner=self, word_id=user_word.word_id, rating=rating, at=now))
             else:
+                passed_test = user_word.sightings == 0 and user_word.word_id not in revealed | skipped
                 user_word.sightings += 1
-                if user_word.sightings >= WARMUP_SIGHTINGS:
+                if passed_test or user_word.sightings >= WARMUP_SIGHTINGS:
                     user_word.status = UserWord.REVIEW
                     user_word.review(Rating.Good, now)
                     user_word.learned_at = user_word.learned_at or now  # a word sent back to warm-up keeps its first date
@@ -800,7 +842,7 @@ class Learner(models.Model):
         ))
         for user_word in looked_up:
             if user_word.status == UserWord.KNOWN:
-                user_word.status, user_word.sightings = UserWord.LEARNING, 0
+                user_word.status, user_word.sightings = UserWord.LEARNING, 1  # not tested again: you just looked it up
             elif user_word.status == UserWord.REVIEW:
                 user_word.review(Rating.Hard, now)
                 logs.append(ReviewLog(learner=self, word_id=user_word.word_id, rating=Rating.Hard, at=now))
@@ -826,8 +868,8 @@ class Learner(models.Model):
 
 
     def _fill_learning_pool(self):
-        """Top the learning pool up with the next words the user hasn't met yet, in JLPT order: every N5 word
-        before any N4 word and so on, most frequent first within a level.
+        """Top the learning pool up with the next words the user hasn't met yet, in the JLPT list's order: every N5
+        word before any N4 word and so on, most frequent first within a level (see _unmet_words).
         Words added to the corpus after onboarding (or 々 words left unmet by an older onboarding) are checked
         against the known kanji here, and become known."""
         missing = LEARNING_POOL - self.words.filter(status=UserWord.LEARNING).count()
@@ -846,12 +888,13 @@ class Learner(models.Model):
 
 
     def _unmet_words(self):
-        """(id, text) of the words the learner hasn't met yet, in the learning order: JLPT level (N5 first), most
-        frequent first within a level. Only words in a standalone sentence (frequency > 0), so sentence mode can serve them."""
+        """(id, text) of the words the learner hasn't met yet, in the learning order: level on the JLPT list (N5 first),
+        most frequent first within a level. Only words on the list, and only those in a standalone sentence
+        (frequency > 0), so sentence mode can serve them."""
         return (
-            Word.objects.filter(frequency__gt=0)
+            Word.objects.filter(list_level__isnull=False, frequency__gt=0)
             .exclude(id__in=UserWord.objects.filter(learner=self).values("word_id"))
-            .order_by("-jlpt", "-frequency", "id").values_list("id", "text")
+            .order_by("-list_level", "-frequency", "id").values_list("id", "text")
         )
 
 

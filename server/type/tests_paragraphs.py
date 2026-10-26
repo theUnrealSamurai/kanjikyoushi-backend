@@ -8,7 +8,9 @@ from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from .models import Learner, Passage, PassageSentence, ReviewLog, Sentence, UserWord, Word, n5_kanji
+from .models import (
+    Learner, Passage, PassageSentence, ReviewLog, Sentence, UserWord, Word, graded_new_words, line_targets, n5_kanji,
+)
 from .tests import NO_DICTIONARY, build_corpus
 
 
@@ -38,6 +40,11 @@ def role_words(tokens, role):
     return [texts[word_id] for word_id in ids]
 
 
+def new_words(tokens):
+    """The new words (as text) of the tokens, tested or warming up."""
+    return role_words(tokens, "test") + role_words(tokens, "learning")
+
+
 @NO_DICTIONARY
 class ParagraphTests(TestCase):
     def setUp(self):
@@ -61,7 +68,7 @@ class ParagraphTests(TestCase):
 
     def learner(self, due=(), learning=(), unseen=(), paragraphs=True, learn_new=True):
         """Onboarded with every N5 kanji (so unlocked), then progress reset: `due` words due since yesterday,
-        `learning` words warming up, `unseen` words never met, every other word known.
+        `learning` words warming up (past their test), `unseen` words never met, every other word known.
         While learning is on, unseen words (from WINDOW) are the next words to learn, so a passage can bring them in."""
         self.client.post("/type/onboard", {"kanji_list": "".join(n5_kanji())}, format="json")
         learner = Learner.objects.get(user=self.user)
@@ -70,7 +77,7 @@ class ParagraphTests(TestCase):
         UserWord.objects.bulk_create(
             UserWord(learner=learner, word=word, due=past if word.text in due else None,
                      status=UserWord.REVIEW if word.text in due else UserWord.LEARNING if word.text in learning
-                     else UserWord.KNOWN)
+                     else UserWord.KNOWN, sightings=1 if word.text in learning else 0)
             for word in Word.objects.exclude(text__in=unseen)
         )
         learner.paragraphs, learner.learn_new = paragraphs, learn_new
@@ -83,9 +90,9 @@ class ParagraphTests(TestCase):
             Learner.objects.filter(user=self.user).update(current={})
         return self.client.post("/type/next").json()
 
-    def submit(self, payload):
-        return self.client.post("/type/submit", {"sentence_id": payload["sentence_id"], "typed": payload["text"]},
-                                format="json").json()
+    def submit(self, payload, revealed=()):
+        return self.client.post("/type/submit", {"sentence_id": payload["sentence_id"], "typed": payload["text"],
+                                                 "revealed": list(revealed)}, format="json").json()
 
     def toggle(self, on):
         return self.client.post("/type/paragraphs", {"on": on}, format="json")
@@ -196,7 +203,7 @@ class ParagraphTests(TestCase):
         self.assertEqual((roles["先生"], roles["学生"]), ("known", "unseen"))  # both graded already: not again
         self.submit(payload)
         self.assertEqual(ReviewLog.objects.filter(learner=learner, word__text="先生").count(), 1)
-        self.assertEqual(learner.words.get(word__text="学生").sightings, 1)
+        self.assertEqual(learner.words.get(word__text="学生").sightings, 2)  # one more, from 1
 
     def test_learn_mode_needs_a_new_word_and_review_mode_a_due_word(self):
         due_only = self.passage("雨が降った。", "川の水は冷たい。")
@@ -224,12 +231,12 @@ class ParagraphTests(TestCase):
 
         payload = self.next()
         self.assertEqual(payload["passage"]["id"], big.id)
-        order = list(Word.objects.filter(text__in=WINDOW).order_by("-jlpt", "-frequency", "id").values_list("text", flat=True))
+        order = list(Word.objects.filter(text__in=WINDOW).order_by("-list_level", "-frequency", "id").values_list("text", flat=True))
         new = {"学生", *order[:4]}  # the warm-up word first, then the window in the learning order: 5 in all
         self.assertEqual(set(learner.words.filter(status=UserWord.LEARNING).values_list("word__text", flat=True)), new)
         self.assertFalse(learner.words.filter(word__text__in=order[4:]).exists())  # the rest stay unmet
         lines = payload["passage"]["lines"]
-        self.assertEqual({word for line in lines for word in role_words(line["tokens"], "learning")}, new)
+        self.assertEqual({word for line in lines for word in new_words(line["tokens"])}, new)
         self.assertEqual({word for line in lines for word in role_words(line["tokens"], "unseen")}, set(order[4:]))
 
     def test_due_words_come_first_then_new_ones(self):
@@ -249,11 +256,44 @@ class ParagraphTests(TestCase):
         self.learner(due=("先生", "本", "読む", "父", "車"), unseen=WINDOW)
         payload = self.next()
         self.assertEqual(payload["passage"]["id"], two_new.id)
-        self.assertEqual({word for line in payload["passage"]["lines"] for word in role_words(line["tokens"], "learning")},
+        self.assertEqual({word for line in payload["passage"]["lines"] for word in role_words(line["tokens"], "test")},
                          {"犬", "走る"})
 
         Learner.objects.filter(user=self.user).update(current={}, recent_passages=[two_new.id])
         self.assertEqual(self.next()["passage"]["id"], one_new.id)  # no passage left with 2: 1 will do
+
+    def test_new_words_stay_tested_on_every_line_until_their_own(self):
+        self.passage("先生は本を読んだ。", "母は魚を買った。", "父は車で来た。", "犬が走った。")
+        learner = self.learner(due=("先生",), unseen=WINDOW)
+        payload = self.next()
+        self.assertEqual(role_words(payload["passage"]["lines"][3]["tokens"], "test"), ["犬", "走る"])  # furigana hidden
+        for _ in range(3):
+            payload = self.submit(payload)
+        self.assertEqual(role_words(payload["tokens"], "test"), ["犬", "走る"])
+
+        self.submit(payload, revealed=[Word.objects.get(text="犬").id])  # Tab on 犬; 走る typed without help
+        statuses = dict(learner.words.filter(word__text__in=("犬", "走る")).values_list("word__text", "status"))
+        self.assertEqual(statuses, {"犬": UserWord.LEARNING, "走る": UserWord.REVIEW})
+
+    def test_a_line_grades_at_most_two_new_words(self):
+        self.assertEqual(line_targets({1, 2, 3, 9}, {"review": [9], "learning": [1, 2, 3]}, []), ([9], [1, 2]))
+        self.assertEqual(graded_new_words([{1, 2, 3}, {3, 4}], [1, 2, 3]), [1, 2, 3])  # 3 waits for the next line
+        self.assertEqual(graded_new_words([{1, 2, 3}, {4}], [1, 2, 3, 4]), [1, 2, 4])  # no line left for 3
+
+        self.passage("先生と学生は話した。", "母は魚を買った。")
+        learner = self.learner(learning=("先生", "学生", "話す"))
+        payload = self.next()
+        self.assertEqual(len(role_words(payload["tokens"], "learning")), 2)
+        self.assertEqual(len(role_words(payload["tokens"], "unseen")), 1)  # the third waits: no later line has it
+        self.submit(self.submit(payload))
+        self.assertEqual(learner.words.filter(sightings=2).count(), 2)
+
+    def test_coverage_counts_only_words_on_the_list(self):
+        low = self.passage("雨が降った。", "川の水は冷たい。", only=False)
+        self.learner(due=("雨",), unseen=("川", "水", "冷たい"), learn_new=False)  # 2 of 5 met: below 60%
+        self.assertIsNone(self.next(fresh=True)["passage"])
+        Word.objects.filter(text__in=("川", "水")).update(list_level=None)  # off the list: like names, never graded
+        self.assertEqual(self.next(fresh=True)["passage"]["id"], low.id)  # 2 of 3 list words met
 
     def test_several_due_words_are_graded_across_lines(self):
         self.passage("先生は本を読んだ。", "母は魚を買った。", "父は車で来た。")
