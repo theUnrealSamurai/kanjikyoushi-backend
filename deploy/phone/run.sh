@@ -63,7 +63,8 @@ case "${1:-}" in
         ;;
     restart-app)
         running || exec "$0" start
-        pkill -f "gunicorn .*server.wsgi"; pkill -f "node $APP/frontend/server.js"
+        # Next.js renames its process to "next-server (vX.Y.Z)", so its original command line no longer matches.
+        pkill -f "gunicorn .*server.wsgi"; pkill -f "node $APP/frontend/server.js"; pkill -f "^next-server"
         echo "restarting Django and Next.js"
         ;;
     *) echo "usage: run.sh start | stop | restart-app"; exit 2 ;;
