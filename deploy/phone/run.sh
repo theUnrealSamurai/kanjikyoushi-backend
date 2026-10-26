@@ -43,8 +43,8 @@ supervise() {
     keep backend as_app "$APP/venv/bin/gunicorn" --chdir "$APP/backend/server" server.wsgi \
         --bind 127.0.0.1:8000 --workers 2 --worker-tmp-dir /tmp \
         --access-logfile - --access-logformat '%(t)s %({x-forwarded-for}i)s "%(r)s" %(s)s %(L)ss'
-    # Loopback only: the site is reachable through Tailscale and nothing else, not even the home Wi-Fi.
-    keep frontend as_app env PORT=3000 HOSTNAME=127.0.0.1 node "$APP/frontend/server.js"
+    # Reachable through Tailscale (over loopback) and from the home Wi-Fi; service.sh's firewall refuses the rest.
+    keep frontend as_app env PORT=3000 HOSTNAME=0.0.0.0 node "$APP/frontend/server.js"
 
     while :; do sleep 3600; trim_logs; done
 }

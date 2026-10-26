@@ -21,13 +21,13 @@ processes and restarts any that exit. `battery.sh` is independent of the app (se
 |---|---|---|
 | `tailscaled` (userspace networking) | root | none, reaches the tailnet |
 | gunicorn serving Django, 2 workers | `kanji` | `127.0.0.1:8000` |
-| Next.js standalone (`node frontend/server.js`) | `kanji` | `127.0.0.1:3000` (loopback only) |
+| Next.js standalone (`node frontend/server.js`) | `kanji` | `0.0.0.0:3000`, IPv4 only; the firewall admits loopback and home-network addresses |
 
 The browser only talks to Next.js. The frontend is built with `NEXT_PUBLIC_HOST=/api`, and `next.config.mjs`
 rewrites only `/api/home/*` and `/api/type/*` to Django on `127.0.0.1:8000`. Nothing else is forwarded, so
-Django's admin and JWT token views are not reachable from outside (they 404). Next.js listens on loopback, so
-the site is reachable only through Tailscale (Serve hands it HTTPS requests from the tailnet), not from the
-home Wi-Fi and not from the internet.
+Django's admin and JWT token views are not reachable from outside (they 404). The site has two ways in and no
+others: Tailscale (Serve hands it HTTPS requests from the tailnet, over loopback) and the home Wi-Fi, at
+`http://<phone's IP>:3000` (plain HTTP, home only; currently `http://192.168.3.88:3000`). Never the internet.
 
 Layout inside the chroot, under `/srv/kanjikyoushi/`:
 
@@ -50,9 +50,13 @@ cutlet, UniDic and psycopg. To change the corpus, run it on the Mac and ship the
 - Signup is invite-only (see "Invite codes").
 - Rate limits (`settings.py`): anonymous 60/min, signed-in users 300/min, login 10/hour per account name,
   signup 5/hour per IP. The counters live in a file cache (`DJANGO_CACHE_DIR`) shared by the gunicorn workers.
-- The Django admin and token views are not exposed, and Next.js and gunicorn bind to loopback only.
-- `service.sh` adds a firewall rule: uid 2900 (`kanji`) may only use loopback, so a compromised app can't
-  reach other devices on the Wi-Fi or the internet. Root processes such as `tailscaled` are not restricted.
+- The Django admin and token views are not exposed, and gunicorn binds to loopback only.
+- `service.sh` sets up the firewall:
+  - Incoming: port 3000 only accepts loopback and private home-network addresses (192.168/16, 10/8,
+    172.16/12); IPv6 to it is refused, since the phone may have a public IPv6 address.
+  - Outgoing: uid 2900 (`kanji`) can answer connections made to it but can only start them over loopback, so
+    a compromised app can't reach other devices on the Wi-Fi or the internet. Root processes such as
+    `tailscaled` are not restricted.
 - The app processes run as `kanji`, not root.
 
 This does not cover a root-level compromise of the phone (a kernel exploit, say), which would bypass the
