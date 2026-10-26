@@ -1,5 +1,5 @@
 #!/bin/bash
-# Runs inside Debian. A small supervisor that keeps tailscaled, Django (gunicorn) and Next.js running,
+# Runs inside Debian. A small supervisor that keeps sshd, tailscaled, Django (gunicorn) and Next.js running,
 # restarting whichever one exits. Logs go to /srv/kanjikyoushi/logs/.
 #
 #   run.sh start         start the supervisor in the background (boot calls this)
@@ -35,8 +35,9 @@ supervise() {
     echo $$ > "$PIDFILE"
     echo -900 > /proc/self/oom_score_adj  # Android's low-memory killer takes apps long before these
     set -a; . "$APP/env"; set +a
-    mkdir -p /run/tailscale
+    mkdir -p /run/tailscale /run/sshd
 
+    keep sshd /usr/sbin/sshd -D -e
     keep tailscaled tailscaled --tun=userspace-networking --statedir=/var/lib/tailscale \
         --socket=/run/tailscale/tailscaled.sock
     # The access log records X-Forwarded-For, the only place the real client address shows up behind the proxies.

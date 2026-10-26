@@ -14,11 +14,12 @@ phone's copy is the real one. Back it up (see below) before anything risky.
 
 Magisk runs two boot scripts from `/data/adb/service.d/`. `service.sh` waits for the boot to finish, takes a
 wake lock (without one the phone sleeps with the screen off and stops answering), adds a firewall rule (see
-"Security"), then runs `chroot.sh start`. That starts `run.sh` in `/data/debian`, which supervises three
+"Security"), then runs `chroot.sh start`. That starts `run.sh` in `/data/debian`, which supervises four
 processes and restarts any that exit. `battery.sh` is independent of the app (see "Battery").
 
 | Process | Runs as | Listens on |
 |---|---|---|
+| `sshd` | root | `0.0.0.0:2222`, IPv4; key-only, home network only |
 | `tailscaled` (userspace networking) | root | none, reaches the tailnet |
 | gunicorn serving Django, 2 workers | `kanji` | `127.0.0.1:8000` |
 | Next.js standalone (`node frontend/server.js`) | `kanji` | `0.0.0.0:3000`, IPv4 only; the firewall admits loopback and home-network addresses |
@@ -52,12 +53,14 @@ cutlet, UniDic and psycopg. To change the corpus, run it on the Mac and ship the
   signup 5/hour per IP. The counters live in a file cache (`DJANGO_CACHE_DIR`) shared by the gunicorn workers.
 - The Django admin and token views are not exposed, and gunicorn binds to loopback only.
 - `service.sh` sets up the firewall:
-  - Incoming: port 3000 only accepts loopback and private home-network addresses (192.168/16, 10/8,
-    172.16/12); IPv6 to it is refused, since the phone may have a public IPv6 address.
+  - Incoming: the site (3000) and SSH (2222) only accept loopback and private home-network addresses
+    (192.168/16, 10/8, 172.16/12); IPv6 to them is refused, since the phone may have a public IPv6 address.
   - Outgoing: uid 2900 (`kanji`) can answer connections made to it but can only start them over loopback, so
     a compromised app can't reach other devices on the Wi-Fi or the internet. Root processes such as
     `tailscaled` are not restricted.
 - The app processes run as `kanji`, not root.
+- SSH (port 2222, inside Debian) takes the Mac's dedicated key only: no passwords, home Wi-Fi only.
+- The USB cable always works as a way in: `adb` with Magisk root, whatever happens to Wi-Fi or SSH.
 
 This does not cover a root-level compromise of the phone (a kernel exploit, say), which would bypass the
 firewall, and the phone no longer gets HyperOS security updates because the updater was removed. Putting it on
@@ -65,12 +68,11 @@ a guest Wi-Fi network with client isolation is the step that limits that.
 
 ## Invite codes
 
-Signup needs a one-time code. Make codes, or list unused ones, with the `invite` management command, run inside
-the chroot as `kanji` with the env loaded. Both lines run from the Mac, with `C` as in "Logs, status, restarting":
+Signup needs a one-time code. `phone/manage.sh` runs Django's `manage.py` as `kanji` with the server's settings:
 
 ```bash
-adb shell "su -c '$C run bash -c \"set -a; . /srv/kanjikyoushi/env; set +a; setpriv --reuid=kanji --regid=kanji --init-groups /srv/kanjikyoushi/venv/bin/python /srv/kanjikyoushi/backend/server/manage.py invite --count 3 --note friends\"'"
-adb shell "su -c '$C run bash -c \"set -a; . /srv/kanjikyoushi/env; set +a; setpriv --reuid=kanji --regid=kanji --init-groups /srv/kanjikyoushi/venv/bin/python /srv/kanjikyoushi/backend/server/manage.py invite --list\"'"
+ssh kanjikyoushi /srv/kanjikyoushi/phone/manage.sh invite --count 3 --note friends
+ssh kanjikyoushi /srv/kanjikyoushi/phone/manage.sh invite --list
 ```
 
 The first makes three codes noted "friends"; the second prints each unused code with its date and note.
@@ -104,7 +106,11 @@ cd backend/deploy/phone
 ./deploy.sh     # builds, copies the database on the first run, installs, starts
 ```
 
-`setup.sh` is safe to rerun. `bootstrap.sh` installs pinned, checksummed Node, uv and Tailscale, creates
+`setup.sh` also makes `~/.ssh/kanjikyoushi_ed25519` (a key used only for the phone), authorizes it on the phone,
+and adds a `Host kanjikyoushi` entry to `~/.ssh/config` with the phone's Wi-Fi address, so `ssh kanjikyoushi`
+works from the home Wi-Fi. Setup itself always runs over the USB cable.
+
+`setup.sh` is safe to rerun. `bootstrap.sh` installs pinned, checksummed Node, uv, Tailscale and OpenSSH, creates
 the `kanji` user (uid 2900), and writes `env` if it doesn't exist (an old one just gets any missing
 `DJANGO_CACHE_DIR` and `DJANGO_NUM_PROXIES` lines).
 The frontend must be checked out at `../frontend/client` relative to `backend/`, as in the `kanjikyoushi/`
@@ -131,10 +137,11 @@ tailnet devices (tag it and give the tag no outgoing access). Then a compromised
 
 ```bash
 cd backend/deploy/phone
-./deploy.sh
+./deploy.sh          # over SSH on the home Wi-Fi
+./deploy.sh --usb    # over the cable, from anywhere
 ```
 
-It builds the frontend (standalone output), packs the backend and these scripts, pushes one tarball, and
+It builds the frontend (standalone output), packs the backend and these scripts, copies one tarball, and
 runs `release.sh` in the chroot: `uv sync`, `migrate`, swap the code in, then `run.sh restart-app`
 (Django and Next.js only; `tailscaled` keeps running). It ends by printing the HTTP status of
 `/login` on the phone; `200` means it is up. If you changed `service.sh`, `battery.sh` or `bootstrap.sh`, rerun `setup.sh`.
@@ -148,39 +155,43 @@ cd /srv/kanjikyoushi && rm -rf backend frontend && mv backend.old backend && mv 
 
 ## Logs, status, restarting
 
-Every command below runs `chroot.sh` as root on the phone. Quote it exactly like this: adb joins its
-arguments into one string, so `adb shell su -c "..."` without the outer quotes hands `su` only the first word.
+From the home Wi-Fi, over SSH (you land inside Debian as root):
 
 ```bash
-C='sh /data/debian/srv/kanjikyoushi/phone/chroot.sh'
-adb shell "su -c '$C run tail -n 50 /srv/kanjikyoushi/logs/backend.log'"   # or frontend.log, tailscaled.log
-adb shell "su -c '$C run curl -s -o /dev/null -w %{http_code} http://127.0.0.1:3000/login'"
-adb shell "su -c '$C run ps -eo user,pid,rss,args'"     # tailscaled, gunicorn (3), next-server
-adb shell "su -c '$C run /srv/kanjikyoushi/phone/run.sh restart-app'"   # Django + Next.js
-adb shell "su -c '$C stop'" && adb shell "su -c '$C start'"             # everything, including tailscaled
+ssh kanjikyoushi tail -n 50 /srv/kanjikyoushi/logs/backend.log      # or frontend.log, tailscaled.log, sshd.log
+ssh kanjikyoushi curl -s -o /dev/null -w %{http_code} http://127.0.0.1:3000/login
+ssh kanjikyoushi ps -eo user,pid,rss,args                            # sshd, tailscaled, gunicorn (3), next-server
+ssh kanjikyoushi /srv/kanjikyoushi/phone/run.sh restart-app          # Django + Next.js
 ```
 
 `restart-app` works because the supervisor restarts whatever it killed, two seconds later. Each restart
 is logged in the process's log file as "exited with N, restarting in 2s".
 
+Over the cable, the same commands go through `chroot.sh` as root. Quote them exactly like this: adb joins its
+arguments into one string, so `adb shell su -c "..."` without the outer quotes hands `su` only the first word.
+Restarting everything (including `sshd` and `tailscaled`) is a cable job, since it drops SSH itself:
+
+```bash
+C='sh /data/debian/srv/kanjikyoushi/phone/chroot.sh'
+adb shell "su -c '$C run tail -n 50 /srv/kanjikyoushi/logs/backend.log'"
+adb shell "su -c '$C stop'" && adb shell "su -c '$C start'"
+```
+
 ## Getting a shell
 
 ```bash
-adb shell -t "su -c 'sh /data/debian/srv/kanjikyoushi/phone/chroot.sh shell'"   # root shell inside Debian
+ssh kanjikyoushi                                                                  # home Wi-Fi
+adb shell -t "su -c 'sh /data/debian/srv/kanjikyoushi/phone/chroot.sh shell'"   # cable
 ```
 
-To run Django commands, load the env file and use the venv as `kanji`:
-
-```bash
-set -a; . /srv/kanjikyoushi/env; set +a
-setpriv --reuid=kanji --regid=kanji --init-groups /srv/kanjikyoushi/venv/bin/python \
-    /srv/kanjikyoushi/backend/server/manage.py shell
-```
+Both give a root shell inside Debian. For Django commands use `phone/manage.sh`, e.g. a Django shell:
+`ssh -t kanjikyoushi /srv/kanjikyoushi/phone/manage.sh shell`.
 
 ## Backing up the database
 
 ```bash
-./backup.sh            # saves ~/backups/kanjikyoushi/kanjikyoushi-DATE-TIME.sqlite3 (about 30 s for 1 GB)
+./backup.sh            # over SSH; saves ~/backups/kanjikyoushi/kanjikyoushi-DATE-TIME.sqlite3
+./backup.sh --usb      # over the cable (about 30 s for 1 GB)
 ```
 
 It uses SQLite's online backup inside the chroot, so it's safe while the app is running. To restore, stop
@@ -199,4 +210,5 @@ Reboot to release the wake lock and the chroot mounts. With the battery script g
 that reboot. To delete everything, reboot first, then
 `adb shell "su -c 'rm -rf /data/debian'"`. Do not run that while the chroot is mounted: `/data/debian/dev` is a
 bind mount of Android's `/dev`. Remove the phone from the Tailscale admin console too, or run
-`tailscale serve reset` inside the chroot to stop serving the site while keeping the device.
+`tailscale serve reset` inside the chroot to stop serving the site while keeping the device. On the Mac, delete
+`~/.ssh/kanjikyoushi_ed25519*` and the `Host kanjikyoushi` block in `~/.ssh/config`.

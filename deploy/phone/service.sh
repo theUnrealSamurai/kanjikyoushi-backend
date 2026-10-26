@@ -15,16 +15,19 @@ for ipt in iptables ip6tables; do
         $ipt -w -A oem_out -m owner --uid-owner 2900 ! -o lo -j REJECT
 done
 
-# Incoming: the site on port 3000 answers loopback (Tailscale) and private home-network addresses only, never the
-# internet. Node listens on IPv4 only; IPv6 to the port is refused outright, since the phone may have a public one.
+# Incoming: the site (3000) and SSH (2222) answer loopback (Tailscale) and private home-network addresses only,
+# never the internet. Both listen on IPv4 only; IPv6 to them is refused outright, since the phone may have a
+# public IPv6 address.
 if iptables -w -N kanjikyoushi_in 2>/dev/null; then
     iptables -w -A kanjikyoushi_in -i lo -j RETURN
     for net in 192.168.0.0/16 10.0.0.0/8 172.16.0.0/12; do iptables -w -A kanjikyoushi_in -s $net -j RETURN; done
     iptables -w -A kanjikyoushi_in -j REJECT
 fi
-iptables -w -C INPUT -p tcp --dport 3000 -j kanjikyoushi_in 2>/dev/null ||
-    iptables -w -I INPUT -p tcp --dport 3000 -j kanjikyoushi_in
-ip6tables -w -C INPUT -p tcp --dport 3000 ! -i lo -j REJECT 2>/dev/null ||
-    ip6tables -w -I INPUT -p tcp --dport 3000 ! -i lo -j REJECT
+for port in 3000 2222; do
+    iptables -w -C INPUT -p tcp --dport $port -j kanjikyoushi_in 2>/dev/null ||
+        iptables -w -I INPUT -p tcp --dport $port -j kanjikyoushi_in
+    ip6tables -w -C INPUT -p tcp --dport $port ! -i lo -j REJECT 2>/dev/null ||
+        ip6tables -w -I INPUT -p tcp --dport $port ! -i lo -j REJECT
+done
 
 sh /data/debian/srv/kanjikyoushi/phone/chroot.sh start

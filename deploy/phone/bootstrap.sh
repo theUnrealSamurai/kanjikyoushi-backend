@@ -14,8 +14,24 @@ echo kanjikyoushi > /etc/hostname
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl xz-utils sqlite3 procps less tzdata
+apt-get install -y --no-install-recommends ca-certificates curl xz-utils sqlite3 procps less tzdata \
+    openssh-server openssh-sftp-server
 apt-get clean
+
+# SSH for deploys from the Mac: key-only root login on port 2222, IPv4 only. The firewall in service.sh lets
+# only the home network reach it. Debian's sshd_config includes this file first, so these settings win.
+cat > /etc/ssh/sshd_config.d/kanjikyoushi.conf <<'EOF'
+Port 2222
+ListenAddress 0.0.0.0
+PermitRootLogin prohibit-password
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+UsePAM no
+X11Forwarding no
+AllowUsers root
+EOF
+ssh-keygen -A
+mkdir -p -m 700 /root/.ssh
 
 # The server runs as this user, not root.
 getent group kanji >/dev/null || groupadd --system --gid 2900 kanji

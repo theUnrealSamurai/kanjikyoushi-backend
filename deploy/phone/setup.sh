@@ -26,5 +26,27 @@ root "mkdir -p $APP/phone && cp $TMP/*.sh $APP/phone/ && chmod 755 $APP/phone/*.
 root "sh $APP/phone/chroot.sh run /srv/kanjikyoushi/phone/bootstrap.sh"
 root "cp $APP/phone/service.sh /data/adb/service.d/kanjikyoushi.sh && chmod 755 /data/adb/service.d/kanjikyoushi.sh"
 root "cp $APP/phone/battery.sh /data/adb/service.d/kanjikyoushi-battery.sh && chmod 755 /data/adb/service.d/kanjikyoushi-battery.sh"
+
+# SSH from this Mac: a key used only for the phone, and an `ssh kanjikyoushi` shortcut pointing at its Wi-Fi address.
+KEY=$HOME/.ssh/kanjikyoushi_ed25519
+[ -f "$KEY" ] || ssh-keygen -q -t ed25519 -N "" -C "kanjikyoushi deploy key" -f "$KEY"
+adb push "$KEY.pub" "$TMP/key.pub" >/dev/null
+BLOB=$(cut -d' ' -f2 "$KEY.pub")
+root "grep -q $BLOB /data/debian/root/.ssh/authorized_keys 2>/dev/null || cat $TMP/key.pub >> /data/debian/root/.ssh/authorized_keys; chmod 600 /data/debian/root/.ssh/authorized_keys"
+PHONE_IP=$(adb shell ip -4 addr show wlan0 | awk '/inet /{sub("/.*", "", $2); print $2}')
+if ! grep -q "^Host kanjikyoushi$" "$HOME/.ssh/config" 2>/dev/null; then
+    cat >> "$HOME/.ssh/config" <<EOF
+
+Host kanjikyoushi
+    HostName $PHONE_IP
+    Port 2222
+    User root
+    IdentityFile $KEY
+    IdentitiesOnly yes
+    StrictHostKeyChecking accept-new
+EOF
+    echo "Added 'Host kanjikyoushi' ($PHONE_IP) to ~/.ssh/config"
+fi
+
 adb shell "rm -rf $TMP"
 echo "Phone is set up. Next: deploy.sh"
