@@ -333,7 +333,8 @@ class ParagraphTests(TestCase):
         Learner.objects.filter(user=self.user).update(recent_passages=[better.id])
         payload = self.next()
         self.assertEqual(payload["passage"]["id"], low.id)
-        self.assertEqual(role_words(payload["passage"]["lines"][1]["tokens"], "unseen"), ["川", "冷たい"])  # furigana, not graded
+        self.assertEqual(role_words(payload["passage"]["lines"][1]["tokens"], "unseen"), ["冷たい"])  # furigana, not graded
+        self.assertEqual(role_words(payload["passage"]["lines"][1]["tokens"], "known"), ["川", "水"])  # 川 a known kanji
 
     def test_onboarding_resets_paragraph_mode(self):
         learner = self.learner()

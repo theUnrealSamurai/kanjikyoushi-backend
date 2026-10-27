@@ -96,6 +96,85 @@ def furigana(surface, reading):
     return [[run, rt if has_kanji(run) else ""] for run, rt in zip(runs, match.groups())]
 
 
+# Sound changes a kanji's reading goes through inside a word: rendaku (友達 ともだち: たち -> だち), handakuten after
+# ん or っ (一杯 いっぱい: はい -> ぱい) and a final つ/ち/く/き becoming っ before the next kanji (発達 はったつ).
+RENDAKU = {"か": "が", "き": "ぎ", "く": "ぐ", "け": "げ", "こ": "ご", "さ": "ざ", "し": "じ", "す": "ず", "せ": "ぜ",
+           "そ": "ぞ", "た": "だ", "ち": "ぢじ", "つ": "づず", "て": "で", "と": "ど", "は": "ばぱ", "ひ": "びぴ",
+           "ふ": "ぶぷ", "へ": "べぺ", "ほ": "ぼぽ"}
+UNVOICED = {sound: plain for plain, sounds in RENDAKU.items() for sound in sounds}
+GEMINATES = "つちくき"
+I_ROW = {"う": "い", "く": "き", "ぐ": "ぎ", "す": "し", "つ": "ち", "ぬ": "に", "ぶ": "び", "む": "み", "る": "り"}
+
+
+def kun_forms(kun):
+    """The ways a kun reading shows up over its kanji: the stem, plus the stem with its okurigana's masu-stem folded in,
+    for words written without it ('う.ける' -> う, うけ as in 受付; 'と.る' -> と, とり as in 取引)."""
+    stem, _, okurigana = kun.strip("-").partition(".")
+    okurigana = okurigana.strip("-")
+    forms = {stem}
+    if okurigana:
+        forms.add(stem + okurigana[:-1])                                  # ichidan: つ.ける -> つけ
+        if okurigana[-1] in I_ROW:
+            forms.add(stem + okurigana[:-1] + I_ROW[okurigana[-1]])        # godan: と.る -> とり
+    return forms - {""}
+
+
+@lru_cache(maxsize=None)
+def kanji_readings(kanji):
+    """{form: reading} for one kanji: every form its readings take in a word (sound changes included), each mapped to
+    the reading it is a form of (an on reading in hiragana, or a kun reading's stem). 達: たち, だち -> たち; たつ, たっ,
+    だつ... -> たつ. Longest forms first, so the alignment tries them first."""
+    info = kanji_dictionary().get(kanji, {})
+    on = {to_hiragana(reading) for reading in info.get("on_readings", [])}
+    kun = {kun: kun.strip("-").partition(".")[0] for kun in info.get("kun_readings", [])}
+    listed = on | set(kun.values())
+
+    def plain(reading):
+        """Some rendaku forms are listed as readings of their own (日: -び, 時: -どき): they're the plain one."""
+        unvoiced = UNVOICED.get(reading[0], reading[0]) + reading[1:]
+        return unvoiced if unvoiced in listed else reading
+
+    forms = {reading: plain(reading) for reading in sorted(on)}  # the readings as listed come first: a sound change
+    for entry, stem in sorted(kun.items()):                        # never shadows one (達: だ is a reading of its own)
+        for form in sorted(kun_forms(entry)):
+            forms.setdefault(form, plain(stem))
+    for base, reading in sorted(forms.items()):
+        voiced = [sound + base[1:] for sound in RENDAKU.get(base[0], "")]
+        # Only on readings end in a っ before the next kanji (達成 たっせい is たつ, not the kun たち).
+        geminated = [form[:-1] + "っ" for form in [base] + voiced if base in on and len(form) > 1 and form[-1] in GEMINATES]
+        for form in voiced + geminated:
+            forms.setdefault(form, reading)
+    return dict(sorted(forms.items(), key=lambda item: -len(item[0])))
+
+
+def align(run, reading):
+    """[(kanji, reading), ...] for a run of kanji read as `reading` (友達/ともだち -> [(友, とも), (達, たち)]), using the
+    kanji dictionary's readings; None if they can't account for it (今日/きょう, 大人/おとな: read as a whole)."""
+    if not run:
+        return [] if not reading else None
+    for form, base in kanji_readings(run[0]).items():
+        if reading.startswith(form):
+            rest = align(run[1:], reading[len(form):])
+            if rest is not None:
+                return [(run[0], base)] + rest
+    return None
+
+
+@lru_cache(maxsize=100_000)
+def reading_units(surface, reading):
+    """The readings a word is read with, one (kanji, reading) per kanji: what you need to know to read it without
+    furigana. 人達/ひとたち and 友達/ともだち share (達, たち); 発達/はったつ has (達, たつ), a different reading.
+    A run of kanji the dictionary can't split (今日/きょう) is one unit, so it has to be learned as a whole.
+    The repeat mark 々 is read as the kanji before it (人々/ひとびと: (人, ひと) twice)."""
+    units = []
+    for run, rt in furigana(surface, reading):
+        if not rt:
+            continue
+        run = "".join(run[i - 1] if char == "々" and i else char for i, char in enumerate(run))
+        units += align(run, to_hiragana(rt)) or [(run, to_hiragana(rt))]
+    return tuple(units)
+
+
 @lru_cache(maxsize=1)
 def tagger():
     import fugashi

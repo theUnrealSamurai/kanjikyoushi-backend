@@ -64,6 +64,17 @@ class ParseTests(SimpleTestCase):
     def test_readings_are_hiragana(self):
         self.assertEqual(self.only("頑張る; 頑張る", "ガンバる; がんばる").readings, ["がんばる", "がんばる"])
 
+    def test_listed_kana_suffix_gets_its_kanji_spelling(self):
+        entry = self.only("～たち", "～たち")
+        self.assertEqual((entry.variants, entry.readings, entry.affix), (["たち", "達"], ["たち"], True))
+        self.assertEqual([self.only(f"～{kana}", f"～{kana}").variants[1:]
+                          for kana in ("すぎ", "やすい", "おき")], [["過ぎ"], ["易い"], ["置き"]])
+
+    def test_other_kana_entries_get_no_spelling(self):
+        self.assertEqual(self.only("ああ", "ああ").variants, ["ああ"])
+        self.assertEqual(self.only("～ちゃん", "～ちゃん").variants, ["ちゃん"])
+        self.assertEqual(self.only("たち", "たち").variants, ["たち"])  # no ～: a plain word, not the suffix
+
     def test_kana_only_entry_has_no_kanji_variant_to_match(self):
         entry = self.only("ああ", "ああ")
         self.assertEqual(entry.variants, ["ああ"])
@@ -103,6 +114,31 @@ class MatchTests(SimpleTestCase):
         words = [(1, "位", "くらい", 50), (2, "位", "い", 3)]
         self.assertEqual(list_levels([self.entry(2, "～位", "～い")], words), {2: 2})
         self.assertEqual(list_levels([self.entry(2, "～位", "～い")], words[:1]), {})
+
+    def test_kana_suffix_matches_its_kanji_with_the_reading(self):
+        words = [(1, "達", "たっし", 90), (2, "達", "たち", 40)]
+        self.assertEqual(list_levels([self.entry(5, "～たち", "～たち")], words), {2: 5})
+        self.assertEqual(list_levels([self.entry(5, "～たち", "～たち")], words[:1]), {})
+
+    def test_kana_entry_without_a_mapping_matches_nothing(self):
+        words = [(1, "達", "たち", 40), (2, "他", "ほか", 9)]
+        self.assertEqual(list_levels([self.entry(5, "～ほか", "～ほか")], words), {})
+        self.assertEqual(list_levels([self.entry(5, "たち", "たち")], words), {})
+
+    def test_old_okurigana_matches_the_modern_spelling(self):
+        words = [(1, "終わる", "おわる", 30), (2, "終わる", "しゅうわる", 99), (3, "終り", "おわり", 5)]
+        self.assertEqual(list_levels([self.entry(5, "終る", "おわる")], words), {1: 5})
+
+    def test_okurigana_fallback_needs_the_reading(self):
+        self.assertEqual(list_levels([self.entry(5, "終る", "おわる")], [(1, "終わる", "ついる", 30)]), {})
+
+    def test_the_common_spelling_wins(self):
+        words = [(1, "終る", "おわる", 91), (2, "終わる", "おわる", 5041)]  # the corpus has both: the list's is rare
+        self.assertEqual(list_levels([self.entry(5, "終る", "おわる")], words), {2: 5})
+        words = [(1, "終る", "おわる", 500), (2, "終わる", "おわる", 1)]
+        self.assertEqual(list_levels([self.entry(5, "終る", "おわる")], words), {1: 5})
+        words = [(1, "下す", "くだす", 317), (2, "下ろす", "おろす", 465)]  # 下す,おろす: the reading the list gives wins
+        self.assertEqual(list_levels([self.entry(3, "下す", "おろす")], words), {2: 3})
 
     def test_easiest_level_wins(self):
         words = [(1, "会う", "あう", 20)]
@@ -147,10 +183,11 @@ class ApplyTests(TestCase):
             apply_list_levels(Word, folder)
 
     def test_many_rows_are_written_in_chunks(self):
-        Word.objects.bulk_create([Word(text=f"水{number}", reading="みず", jlpt=5) for number in range(2000)])
+        texts = [chr(0x4E00 + number) for number in range(2000)]  # 2000 kanji: one word each, not spellings of one
+        Word.objects.bulk_create([Word(text=text, reading="みず", jlpt=5) for text in texts])
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
-        write_lists(folder.name, n5=[(f"水{number}", "みず") for number in range(2000)])
+        write_lists(folder.name, n5=[(text, "みず") for text in texts])
         self.assertEqual(apply_list_levels(Word, Path(folder.name))[5], 2000)
         self.assertEqual(Word.objects.filter(list_level=5).count(), 2000)
 

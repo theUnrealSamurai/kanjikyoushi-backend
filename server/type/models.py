@@ -11,7 +11,7 @@ from django.db.models import Q
 from django.utils import timezone
 from fsrs import Card, Rating, Scheduler
 
-from .corpus import KANJI_RE, furigana, has_kanji, jlpt_kanji, kanji_dictionary, kanji_info, same_text
+from .corpus import KANJI_RE, furigana, has_kanji, jlpt_kanji, kanji_dictionary, kanji_info, reading_units, same_text
 
 
 scheduler = Scheduler()
@@ -95,19 +95,24 @@ def word_role(word_id, review, learning, statuses, testing=frozenset()):
     return "known"
 
 
-def sentence_tokens(sentence, review, learning, statuses, kana_with_meanings, testing=frozenset()):
+def sentence_tokens(sentence, review, learning, statuses, kana_with_meanings, testing=frozenset(), can_read=None):
     """The sentence's tokens for the typing page: furigana pairs, the role of each word (see word_role) and, for a
-    kana-only word with a meaning (an id in kana_with_meanings), its lookup id for Tab."""
-    tokens = [
-        {
+    kana-only word with a meaning (an id in kana_with_meanings), its lookup id for Tab.
+    can_read(surface, reading) (see Learner.reader): a word never met that the learner can read anyway, because every
+    kanji in it is read the way they already read it, is "known" instead: furigana hidden until Tab, never graded.
+    A word warming up keeps its furigana: they're learning it (or looked it up and were sent back to the warm-up)."""
+    tokens = []
+    for surface, reading, word_id, *rest in sentence.tokens:
+        role = word_role(word_id, review, learning, statuses, testing)
+        if role == "unseen" and word_id not in statuses and can_read and can_read(surface, reading):
+            role = "known"
+        tokens.append({
             "text": surface,
             "word": word_id,
-            "role": word_role(word_id, review, learning, statuses, testing),
+            "role": role,
             "ruby": furigana(surface, reading),
             "lookup": rest[0] if rest and rest[0] in kana_with_meanings else None,
-        }
-        for surface, reading, word_id, *rest in sentence.tokens
-    ]
+        })
     # Names, numbers and counters have kanji but no word to learn. Tab still opens a card for them (reading and
     # kanji, never graded) instead of skipping ahead; a run of them shares one card, so 一振り reads as one word.
     start = None
@@ -747,7 +752,9 @@ class Learner(models.Model):
             word_id__in=self.current["targets"]["learning"] if lines else self.current["learning"],
             status=UserWord.LEARNING, sightings=0,
         ).values_list("word_id", flat=True))
-        tokens = sentence_tokens(sentence, set(self.current["review"]), set(self.current["learning"]), statuses, kana, testing)
+        can_read = self.reader([sentence, *(line.sentence for line in lines)])
+        tokens = sentence_tokens(sentence, set(self.current["review"]), set(self.current["learning"]), statuses, kana, testing,
+                                 can_read)
         extra_words = extra_cards(sentence, tokens)
         # Dictionary data for the page's cards; the keys are word ids as strings (JSON object keys).
         graded = {t["word"] for t in tokens if t["word"]}  # every word, so Tab can open the card of whichever comes next
@@ -770,11 +777,33 @@ class Learner(models.Model):
             "kana_words": kana_words,  # meanings for kana-only words, shown by Tab without any grading
             "extra_words": extra_words,  # names, numbers and counters, keyed by token "extra"; never graded
             "stats": self.stats(),
-            "passage": self._passage_view(lines, statuses, kana, testing) if lines else None,
+            "passage": self._passage_view(lines, statuses, kana, testing, can_read) if lines else None,
         }
 
 
-    def _passage_view(self, lines, statuses, kana, testing):
+    def reader(self, sentences):
+        """can_read(surface, reading) for the words in these sentences: whether the learner can read the word without
+        furigana. They can when each kanji in it (see reading_units) is read the way it is in a word they have learned
+        or know, or is a kanji they knew at onboarding (any reading, as for the words made only of those). So once
+        友達 is learned, 人達 needs no furigana, but 発達 (達 read たつ) still does."""
+        known_kanji = set(self.known_kanji) | set(NOT_KANJI)
+        kanji = {kanji for sentence in sentences for surface, _, word_id, *_ in sentence.tokens if word_id
+                 for kanji in KANJI_RE.findall(surface)}
+        units = set()
+        if kanji - known_kanji:
+            for text, reading in self.words.filter(status__in=(UserWord.REVIEW, UserWord.KNOWN)).values_list("word__text", "word__reading"):
+                if not kanji.isdisjoint(text):
+                    units.update(reading_units(text, reading))
+
+        def can_read(surface, reading):
+            word_units = reading_units(surface, reading)
+            return bool(word_units) and all(
+                unit in units or set(KANJI_RE.findall(unit[0])) <= known_kanji for unit in word_units
+            )
+        return can_read
+
+
+    def _passage_view(self, lines, statuses, kana, testing, can_read=None):
         """The passage around the line being typed (lines: its PassageSentence rows, in order, with passage and
         sentence loaded). Roles in every line come from the passage's targets, as on the line where each is graded."""
         passage, targets = lines[0].passage, self.current["targets"]
@@ -791,7 +820,7 @@ class Learner(models.Model):
                 {
                     "sentence_id": line.sentence_id,
                     "text": line.sentence.text,
-                    "tokens": sentence_tokens(line.sentence, review, learning, statuses, kana, testing),
+                    "tokens": sentence_tokens(line.sentence, review, learning, statuses, kana, testing, can_read),
                 }
                 for line in lines
             ],

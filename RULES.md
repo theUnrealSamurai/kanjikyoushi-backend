@@ -22,6 +22,7 @@ Rules for anyone (human or AI) working on KanjiKyoushi, compiled from the owner'
 ## Learning and review behaviour
 
 - The word is the unit, keyed by text and reading. Names and numbers show furigana but are never graded.
+- Readings carry over (owner, 2026-10-27: "track it with the readings"): furigana is decided per kanji reading, not per word. A word never met shows no furigana when each of its kanji is read the way it is in a word the user has learned or knows (友達 makes 人達 readable; 発達, with 達 read たつ, still isn't), or is a kanji known at onboarding (any reading). Rendaku and っ count as the same reading; special readings (今日, 大人) must be learned as words. Such words aren't graded and Tab on them changes nothing. Warm-up words keep their furigana.
 - The repeat marks 々〆ヶ aren't kanji to learn: a word like 人々 counts as known once 人 is known.
 - A new word's first sighting is a test, with furigana hidden: typed without help (no Tab, help mode or ⌥Tab), it skips the warm-up and gets its FSRS card straight away. Otherwise it gets the warm-up (3 typings in all, furigana showing), then an FSRS card. Trust FSRS scheduling; there are no flashcards to rate.
 - Reviews are graded only by whether you needed the reading: no help is Good, needing Tab (or help mode) for the reading is Hard. Typos never count.
