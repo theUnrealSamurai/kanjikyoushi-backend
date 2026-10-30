@@ -1,7 +1,10 @@
 # KanjiKyoushi backend
 
 Django API for KanjiKyoushi: learn to read kanji by typing real Japanese sentences.
-The frontend lives in [kanjikyoushi-frontend](https://github.com/theUnrealSamurai/kanjikyoushi-frontend).
+
+> [!NOTE]
+> This is the backend. The frontend (Next.js site) is
+> **[kanjikyoushi-frontend](https://github.com/theUnrealSamurai/kanjikyoushi-frontend)**.
 
 ## How it works
 
