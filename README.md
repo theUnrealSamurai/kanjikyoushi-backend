@@ -15,11 +15,17 @@ The frontend lives in [kanjikyoushi-frontend](https://github.com/theUnrealSamura
   and numbers get furigana but are never graded.
 - **Only the JLPT vocabulary list is taught** (see "Vocabulary list" below). Every other word is treated like a
   name: furigana and a Tab card, never taught or graded.
-- **Learning.** New words are taken in the list's level order (N5 first, then N4, N3, N2, and N1 last), most
-  frequent first within a level, ten at a time. The first time, a new word is a test with its furigana
+- **Learning.** Kanji are learned in JLPT order, N5 to N1. A word's stage is the harder of its list level and
+  its hardest kanji's level (椅子, an N5 word with an N1 kanji, waits for N1). New words go stage by stage, then
+  by their hardest kanji's place in the kanji list, list level and frequency, ten at a time (`learning_order`).
+  The first time, a new word is a test with its furigana
   hidden: typed without help, you already know it, so it gets its
   [FSRS](https://github.com/open-spaced-repetition/py-fsrs) card straight away. Otherwise it's typed 3 times
   in all with furigana showing, then gets its card.
+- **Sentences.** A sentence's rank is its hardest kanji's place in the kanji list, and the corpus is stored in
+  rank order. A word's sentences are only searched up to the learner's bookmark (where the kanji they can read
+  run out), and a sentence with a kanji they can't read yet comes up only if nothing else has the words being
+  tested. From N2 on, the next sentence is prepared while one is typed (`/type/prefetch`).
 - **Reviews happen while typing.** Each sentence grades every due word in it, with their furigana hidden:
   - typed without help → Good
   - needed Tab (or help mode) to see the reading → Hard
@@ -65,9 +71,9 @@ prints a reminder to run `load_dictionary`.
 
 ### Filtering a big corpus
 
-The file is streamed row by row, never loaded whole, so a multi-gigabyte table is fine. Invisible format
-characters (direction marks, zero-width spaces) are always dropped from the text, since nobody can type them.
-These options skip rows before they are tokenized:
+The file is streamed row by row, so a multi-gigabyte table is fine. Invisible format characters (direction marks,
+zero-width spaces) are always dropped from the text, since nobody can type them. These options skip rows before
+they are tokenized:
 
 | Option | |
 |---|---|
@@ -75,19 +81,51 @@ These options skip rows before they are tokenized:
 | `--min-score X`, `--score-column COL` | skip rows scoring below X or with no valid score (column defaults to `score_ev_20230516`) |
 | `--sample FRACTION`, `--seed N` | keep each passing row with this probability (seeded, default seed 0) |
 | `--joyo-only` | skip sentences with any kanji outside the jōyō list (school grades 1–6 and 8) |
-| `--limit N` | stop after loading N sentences |
+| `--jlpt-only` | skip sentences with any kanji that is not on the JLPT lists (N5 to N1) |
+| `--max-katakana N` | skip sentences with more than N katakana letters |
+| `--limit N` | stop reading the file once N sentences have passed the filters |
 
-Rows in the Massif `fragment_table.tsv` are in novel order, so `--limit` alone would only take the first few
-novels; `--sample` spreads the loaded sentences over the whole file. A reasonable ~1M-sentence subset
-(of the 30.4M rows, about 6.3M are 6-40 characters, score 1.46 or more and use only jōyō kanji, so
-sampling 15% gives roughly 950k; the `--limit` is a safety cap that would otherwise cut the sample off
-at the end of the file):
+Sentences with no kanji are always skipped: there is nothing to learn in them.
+
+Two more options change how it runs: `--workers N` (default: CPU count - 1) tokenizes in that many processes, and
+`--drop-indexes` drops the through table's word indexes during the load and rebuilds them at the end (faster for
+a load of millions of sentences when the table already has many, but the indexes are missing until it finishes).
+While it loads, SQLite runs without fsync and in WAL mode, with a big page cache; both are put back afterwards.
+A killed build leaves a half-built database, so build into a copy, never into the live file.
+
+**Rank order.** The whole file is read and filtered first, and the sentences are grouped by `rank`: the place of
+their hardest kanji in the learning order (N5 kanji first, then N4 ... N1; a kanji off the lists ranks last). They
+are then stored easiest first, so sentence ids ascend with rank. The `Bookmark` table (rank to the last sentence
+id up to it) relies on that, and `build_corpus` rebuilds it at the end. The filtered sentences are held in memory
+meanwhile. Sentences are unique by text, a sentence that was only passage text becomes
+standalone, and ids of deleted sentences are never reused. Words get their `rank` the same way.
+
+The full corpus, every sentence of 6-40 characters with a score of 1.46 or more and only JLPT kanji (about 6M
+sentences, in rank order; run it on a copy of the live database so the words keep their ids):
 
 ```bash
 uv run python manage.py build_corpus ../../data/massif/fragment_table.tsv \
-    --min-length 6 --max-length 40 --min-score 1.46 --joyo-only --sample 0.15 --limit 1000000
+    --min-length 6 --max-length 40 --min-score 1.46 --jlpt-only --replace --workers 9
 uv run python manage.py load_dictionary   # if you haven't yet; meanings for the new words
 ```
+
+`--replace` deletes the old standalone sentences in chunks (passage sentences stay), so the learners' progress is
+kept. The older, smaller cut of about 950k sentences was `--min-length 6 --max-length 40 --min-score 1.46
+--joyo-only --sample 0.15 --limit 1000000`.
+
+**Swapping the phone's database.** Sentence ids change in a rebuild, so build into a copy of a recent snapshot of the
+live database, then copy the users' data over just before the swap, with the site stopped:
+
+```bash
+uv run python manage.py adopt_user_data --from /path/to/live.sqlite3 --dry-run   # check only
+uv run python manage.py adopt_user_data --from /path/to/live.sqlite3
+```
+
+It replaces every table except the corpus (sentences, words, passages, bookmarks) and Django's own bookkeeping
+with the live database's rows, in one transaction, then clears each learner's current sentence and recent list.
+Before it commits it checks that the row counts match and that every word id in `type_userword` and
+`type_reviewlog` is the same (text, reading) word in both databases (and the same for permission and content type
+ids); if not, it rolls back and says what differs. The live database is opened read-only and never written.
 
 `load_dictionary` downloads the latest full English `jmdict-eng-*.json.zip` from jmdict-simplified into
 `data/` (gitignored) the first time; `--file PATH` uses a local `.json` or `.json.zip` instead. It

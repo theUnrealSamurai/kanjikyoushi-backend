@@ -201,6 +201,28 @@ ssh kanjikyoushi chown 2900:2900 /srv/kanjikyoushi/data/passages.jsonl.gz
 ssh kanjikyoushi /srv/kanjikyoushi/phone/manage.sh load_passages /srv/kanjikyoushi/data/passages.jsonl.gz --replace
 ```
 
+## Replacing the corpus
+
+The sentence corpus (about 6M sentences, 6.4 GB) is built on the Mac, which is far quicker, into a copy of a fresh
+backup, so the word ids stay the same as on the phone. The swap then copies everyone's progress into it at the last
+moment. About a minute of downtime.
+
+```bash
+./backup.sh                                     # then copy the backup to data/build/db.sqlite3 (outside the repo)
+cd ../../server && DJANGO_SQLITE_PATH=<copy> uv run python manage.py migrate
+DJANGO_SQLITE_PATH=<copy> uv run python manage.py build_corpus <tsv> ... --replace   # see the main README
+scp <copy> kanjikyoushi:/srv/kanjikyoushi/data/db.new.sqlite3
+ssh kanjikyoushi 'chown kanji:kanji /srv/kanjikyoushi/data/db.new.sqlite3 && chmod 600 /srv/kanjikyoushi/data/db.new.sqlite3'
+./deploy.sh                                     # the code that goes with it
+ssh kanjikyoushi 'set -a; . /srv/kanjikyoushi/env; DJANGO_SQLITE_PATH=/srv/kanjikyoushi/data/db.new.sqlite3 setpriv --reuid=kanji --regid=kanji --init-groups /srv/kanjikyoushi/venv/bin/python /srv/kanjikyoushi/backend/server/manage.py migrate'
+ssh kanjikyoushi 'setsid /srv/kanjikyoushi/phone/swap_db.sh /srv/kanjikyoushi/data/db.new.sqlite3 </dev/null >/dev/null 2>&1 &'
+```
+
+`swap_db.sh` runs detached because stopping the app also stops sshd: reconnect after a minute and read
+`logs/swap.log`. It stops the app, runs `adopt_user_data` (which checks every learned word still has the same id,
+and changes nothing if one doesn't), swaps the files and starts the app. The old database stays as
+`data/db.before-DATE.sqlite3` until you delete it.
+
 ## Backing up the database
 
 ```bash

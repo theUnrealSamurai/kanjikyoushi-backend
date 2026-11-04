@@ -6,6 +6,7 @@ urlpatterns = [
     path("onboard", views.onboard, name="onboard"),
     path("next", views.next_sentence, name="next_sentence"),
     path("submit", views.submit, name="submit"),
+    path("prefetch", views.prefetch, name="prefetch"),
     path("mode", views.mode, name="mode"),
     path("paragraphs", views.paragraphs, name="paragraphs"),
     path("due", views.due, name="due"),

@@ -108,6 +108,18 @@ def submit(request):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 @transaction.atomic
+def prefetch(request):
+    """Prepare the next sentence while the one on screen is typed (see Learner.prefetch). The page sends this when
+    a sentence says "prefetch"; the answer has no body, the next submit just comes back sooner."""
+    learner = get_learner(request)
+    if learner.onboarded:
+        learner.prefetch()
+    return Response(status=204)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@transaction.atomic
 def stats(request):
     """The stats page: learning history per day over the last `days` days (7 to 365, default 30)."""
     days = request.data.get('days', 30)

@@ -6,12 +6,13 @@ from operator import or_
 from zoneinfo import ZoneInfo
 
 from django.contrib.auth.models import User
-from django.db import connection, models
+from django.db import connection, models, transaction
 from django.db.models import Q
 from django.utils import timezone
 from fsrs import Card, Rating, Scheduler
 
-from .corpus import KANJI_RE, furigana, has_kanji, jlpt_kanji, kanji_dictionary, kanji_info, reading_units, same_text
+from .corpus import (BEYOND, KANJI_RE, furigana, has_kanji, jlpt_kanji, kanji_dictionary, kanji_info, kanji_order,
+                     kanji_rank, rank_level, reading_units, same_text)
 
 
 scheduler = Scheduler()
@@ -41,6 +42,7 @@ PASSAGE_COVERAGE_WEIGHT = 40  # score points for that share. Over the 60-100% a 
 PASSAGE_LENGTH_BONUS = 10   # each line of a passage scores a point, up to this many (so at most 9 apart): bigger is better
 RECENT_PASSAGES = 50        # don't repeat a passage finished this recently
 SOURCE_NAMES = {"aozora": "Aozora Bunko"}  # Passage.source -> the name in the credit line
+PREFETCH_FROM_LEVEL = 2     # learners whose next kanji is N2 or harder get their next sentence prepared while they type
 
 
 def line_targets(words, targets, assigned):
@@ -77,6 +79,65 @@ def made_of_known_kanji(text, known):
 def n5_kanji():
     """The N5 kanji (the onboarding page's list): paragraph mode unlocks once every one of them is covered."""
     return frozenset(kanji for kanji, level in jlpt_kanji().items() if level == 5)
+
+
+def teachable_words():
+    """(id, text, rank, list level, frequency) of every word sentence mode can teach: on the list and in a sentence."""
+    return list(Word.objects.filter(list_level__isnull=False, frequency__gt=0)
+                .values_list("id", "text", "rank", "list_level", "frequency"))
+
+
+def learning_order(rows):
+    """The teachable words (rows from teachable_words) in the order they're taught, as (id, text, stage): kanji by
+    kanji, N5 to N1 (owner, 2026-11-04: "I really just want to learn N5 - 4 - 3 - 2 - 1 in order").
+
+    A word's stage is the harder of its level on the vocabulary list and its hardest kanji's level, so 椅子 (an N5
+    word with an N1 kanji) waits for N1, and so does 休学 (an N1 word made of N5 kanji). Stages go N5 first; within
+    one, words go by their hardest kanji in the learning order (corpus.kanji_order), so kanji come in list order,
+    then by list level and frequency. A kanji that no word of its own level's stage has (不 is only in harder
+    words) comes in at that stage with its easiest word that has no harder kanji (不安: an N3 word, but its kanji are
+    N4 and N5), so each level can be finished before the next starts; if every word with it has a harder kanji, it
+    waits for that one's stage."""
+    levels = jlpt_kanji()
+    stage = {id: min(list_level, rank_level(rank)) for id, _, rank, list_level, _ in rows}
+    easiest, staged = {}, set()  # kanji -> (key, id) of its easiest word with no harder kanji; kanji their stage has
+    for id, text, rank, list_level, frequency in rows:
+        for kanji in set(KANJI_RE.findall(text)) & levels.keys():
+            if stage[id] == levels[kanji]:
+                staged.add(kanji)
+            key = (list_level, frequency, -id)
+            if rank_level(rank) == levels[kanji] and (kanji not in easiest or key > easiest[kanji][0]):
+                easiest[kanji] = (key, id)
+    for kanji, (_, id) in easiest.items():
+        if kanji not in staged:
+            stage[id] = max(stage[id], levels[kanji])
+    rows = sorted(rows, key=lambda row: (-stage[row[0]], row[2], -row[3], -row[4], row[0]))
+    return [(id, text, stage[id]) for id, text, *_ in rows]
+
+
+def sentence_range(word_rank, bound):
+    """(first, last) sentence ids to search for a word of this rank, up to the rank `bound`. The corpus is stored in
+    rank order and no sentence with the word is easier than the word, so they all come after the last sentence of
+    the rank before it (passage-only lines and older sentences sit below) and the search stops at the bookmark.
+    The whole table if there are no bookmarks."""
+    last = bookmark(bound)
+    if last is None:
+        return 1, Sentence.objects.order_by("-id").values_list("id", flat=True).first() or 0
+    return (bookmark(word_rank - 1) or 0) + 1, last
+
+
+def sample_sentences(word_id, first, last, count):
+    """Up to `count` ids of standalone sentences with the word, between sentence ids `first` and `last` (see
+    sentence_range), from a random starting point and wrapping round. Each part is one range on the (word_id,
+    sentence_id) index, so it costs the same whether the corpus has a million sentences or thirty."""
+    if first > last:
+        return []
+    start = random.randint(first, last)
+    rows = Sentence.words.through.objects.filter(word_id=word_id, sentence__standalone=True).order_by("sentence_id")
+    ids = list(rows.filter(sentence_id__gte=start, sentence_id__lte=last).values_list("sentence_id", flat=True)[:count])
+    if len(ids) < count:
+        ids += rows.filter(sentence_id__gte=first, sentence_id__lt=start).values_list("sentence_id", flat=True)[:count - len(ids)]
+    return ids
 
 
 def word_role(word_id, review, learning, statuses, testing=frozenset()):
@@ -200,6 +261,7 @@ class Word(models.Model):
     reading = models.CharField(max_length=128)
     frequency = models.PositiveIntegerField(default=0, db_index=True)  # sentences using it; orders words within a level
     jlpt = models.PositiveSmallIntegerField(default=0)  # hardest kanji: 5 = N5 ... 1 = N1, 0 = beyond
+    rank = models.SmallIntegerField(default=BEYOND)     # hardest kanji's place in the learning order (corpus.kanji_rank)
     # Level on the JLPT vocabulary list (assets/jlpt_vocab: 5 = N5 ... 1 = N1); sets the learning order.
     # None: not on the list, so never taught or graded (like a name: furigana and a Tab card only).
     list_level = models.PositiveSmallIntegerField(null=True, blank=True)
@@ -207,9 +269,17 @@ class Word(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["text", "reading"], name="unique_word")]
+        # teachable_words runs on every sentence pick: this covers it, so it reads ~6k index entries, not the table.
+        indexes = [models.Index(fields=["list_level", "frequency", "rank", "text"], name="type_word_teachable",
+                                condition=Q(list_level__isnull=False, frequency__gt=0))]
 
     def __str__(self):
         return f"{self.text} ({self.reading})"
+
+    def save(self, *args, **kwargs):
+        if self._state.adding and self.rank == BEYOND:
+            self.rank = kanji_rank(self.text)  # bulk_create skips this: build_corpus sets it itself
+        super().save(*args, **kwargs)
 
 
 class KanaWord(models.Model):
@@ -235,9 +305,42 @@ class Sentence(models.Model):
     tokens = models.JSONField()  # [[surface, reading, word_id or None, kana_word_id or None], ...] in sentence order
     words = models.ManyToManyField(Word, related_name="sentences")
     standalone = models.BooleanField(default=True, db_default=True)  # False: only in passages, so sentence mode never serves it out of context
+    # Hardest kanji's place in the learning order (corpus.kanji_rank). build_corpus stores standalone sentences in
+    # rank order, easiest first, so a Bookmark (an id) marks where the sentences a learner can read end.
+    rank = models.SmallIntegerField(default=BEYOND)
 
     def __str__(self):
         return self.text
+
+
+class Bookmark(models.Model):
+    """For each rank, the last standalone sentence id whose rank is at or below it: the original n1n5 table's
+    kanji_end_index. Sentence picking only searches ids up to the learner's bookmark, so it never reads past what
+    they know however big the corpus is. Rebuilt by refresh_bookmarks() whenever the corpus changes."""
+
+    rank = models.SmallIntegerField(primary_key=True)
+    last_sentence = models.PositiveIntegerField()  # a sentence id (not a key: it only bounds a range)
+
+
+def refresh_bookmarks():
+    """Rebuild the Bookmark table from the standalone sentences (one pass over the table)."""
+    last, rows = 0, []
+    for rank, top in (Sentence.objects.filter(standalone=True).order_by().values("rank")
+                      .annotate(top=models.Max("id")).order_by("rank").values_list("rank", "top")):
+        last = max(last, top)
+        rows.append(Bookmark(rank=rank, last_sentence=last))
+    with transaction.atomic():
+        Bookmark.objects.all().delete()
+        Bookmark.objects.bulk_create(rows, batch_size=1000)
+
+
+def bookmark(rank):
+    """The last standalone sentence id with a rank at or below this one: 0 if there is none, None if the Bookmark
+    table is empty (no bound: callers check each sentence's rank anyway). One primary-key lookup."""
+    last = Bookmark.objects.filter(rank__lte=rank).order_by("-rank").values_list("last_sentence", flat=True).first()
+    if last is not None:
+        return last
+    return 0 if Bookmark.objects.exists() else None
 
 
 class Passage(models.Model):
@@ -281,6 +384,7 @@ class Learner(models.Model):
     paragraphs = models.BooleanField(default=False)       # paragraph mode, once unlocked: type passages, not single sentences
     recent_passages = models.JSONField(default=list, blank=True)  # ids of recently typed passages
     timezone = models.CharField(max_length=64, blank=True)  # IANA zone from the X-Timezone header: what "today" means
+    upcoming = models.JSONField(default=dict, blank=True)  # the next sentence, prepared while one is typed (see prefetch)
 
     def __str__(self):
         return self.user.username
@@ -303,7 +407,7 @@ class Learner(models.Model):
         self.onboarded = True
         self.learn_new = True
         self.paragraphs = False
-        self.current, self.recent, self.recent_passages = {}, [], []
+        self.current, self.recent, self.recent_passages, self.upcoming = {}, [], [], {}
         self.save()
 
         known_set = set(known)
@@ -366,6 +470,25 @@ class Learner(models.Model):
             ).values_list("word__text", flat=True)
             missing -= {kanji for text in texts for kanji in text}
         return len(n5) - len(missing), len(n5)
+
+
+    def readable_kanji(self, teachable):
+        """(kanji a sentence may contain, bookmark rank), for sentence picking (owner, 2026-11-04: "try not to show
+        the sentences with the kanji I don't know until I learn it"). Readable: known at onboarding, or in a word
+        you know, have learned or are warming up (so a new word's own kanji are fine). The bookmark is the last
+        rank before the first kanji in the learning order you can't read yet, so every sentence up to it is readable.
+        Kanji no teachable word has (rows from teachable_words) are passed over: they'd never be learned, and they
+        only appear in names and unlisted words, which show furigana."""
+        texts = self.words.values_list("word__text", flat=True)
+        readable = set(self.known_kanji) | {kanji for text in texts for kanji in KANJI_RE.findall(text)}
+        can_learn = {kanji for _, text, *_ in teachable for kanji in KANJI_RE.findall(text)}
+        bookmark = -1
+        for kanji, rank in kanji_order().items():  # in rank order
+            if kanji in can_learn and kanji not in readable:
+                break
+            readable.add(kanji)
+            bookmark = rank
+        return readable, bookmark
 
 
     def paragraphs_unlocked(self):
@@ -547,47 +670,130 @@ class Learner(models.Model):
             if sentence:
                 return self.sentence_payload(sentence, dict(self.words.values_list("word_id", "status")))
 
+        teachable = teachable_words()
         if self.learn_new:
-            self._fill_learning_pool()
+            self._fill_learning_pool(teachable)
         due = list(self.due_words().values_list("word_id", flat=True))  # most overdue first
-        learning = list(self.words.filter(status=UserWord.LEARNING).order_by("-word__list_level", "-word__frequency", "word_id")
+        learning = list(self.words.filter(status=UserWord.LEARNING).order_by("word__rank", "-word__list_level", "-word__frequency", "word_id")
                         .values_list("word_id", flat=True)) if self.learn_new else []
         if not due and not learning:
             return None
         statuses = dict(self.words.values_list("word_id", "status"))
-        sentence = self._pick_sentence(due, learning, statuses)
-        return self.sentence_payload(sentence, statuses) if sentence else None
+        sentence, prefetch = self._take_upcoming(due, learning), True
+        if not sentence:
+            readable = self.readable_kanji(teachable)
+            sentence = self._pick_sentence(due, learning, statuses, teachable, readable)
+            prefetch = rank_level(readable[1] + 1) <= PREFETCH_FROM_LEVEL
+        if not sentence:
+            return None
+        return {**self.sentence_payload(sentence, statuses), "prefetch": prefetch}
 
 
-    def _pick_sentence(self, due, learning, statuses):
-        """Pick a single sentence, set it as current and return it (None if no sentence has a target word).
+    def prefetch(self):
+        """Prepare the next single sentence while this one is typed (owner, 2026-11-04: only from N2 on, where a pick
+        takes ~300 ms on the phone; see PREFETCH_FROM_LEVEL). It's picked as if this sentence had been typed: the
+        words it grades aren't targets, and it can't come up again. Stored in `upcoming` for next_sentence, which
+        checks it still fits (see _take_upcoming). Nothing happens in a passage, or for learners below N2."""
+        current = self.current
+        if not current.get("sentence") or current.get("passage") or (self.paragraphs and self.paragraphs_unlocked()):
+            return
+        teachable = teachable_words()
+        readable = self.readable_kanji(teachable)
+        if rank_level(readable[1] + 1) > PREFETCH_FROM_LEVEL:
+            return
+        graded = set(current["review"] + current["learning"])
+        due = [w for w in self.due_words().values_list("word_id", flat=True) if w not in graded]
+        learning = [w for w in self.words.filter(status=UserWord.LEARNING)
+                    .order_by("word__rank", "-word__list_level", "-word__frequency", "word_id")
+                    .values_list("word_id", flat=True) if w not in graded] if self.learn_new else []
+        if not due and not learning:
+            return
+        statuses = dict(self.words.values_list("word_id", "status"))
+        choice = self._choose_sentence(due, learning, statuses, teachable, readable, avoid=current["sentence"])
+        if choice:
+            self.upcoming = {"after": current["sentence"], "sentence": choice[0], "learn_new": self.learn_new}
+            self.save(update_fields=["upcoming"])
+
+
+    def _take_upcoming(self, due, learning):
+        """The sentence prefetch prepared while the last one was typed, set as current, if it still fits: prepared
+        after that sentence, in the same mode, and still with a word to grade (a warm-up word while learning). The
+        words it grades are worked out now, so they're right however the last sentence went. It's used once either
+        way. None if there is none or it doesn't fit: then a sentence is picked as usual."""
+        upcoming = self.upcoming
+        if not upcoming:
+            return None
+        self.upcoming = {}
+        sentence = None
+        if (upcoming["after"] == (self.recent[-1] if self.recent else None) and upcoming["learn_new"] == self.learn_new
+                and not (self.paragraphs and self.paragraphs_unlocked())):
+            sentence = Sentence.objects.filter(id=upcoming["sentence"], standalone=True).first()
+        words = set(Sentence.words.through.objects.filter(sentence=sentence).values_list("word_id", flat=True)) if sentence else set()
+        due_rank = {word_id: rank for rank, word_id in enumerate(due)}
+        review = sorted((w for w in words if w in due_rank), key=due_rank.get)
+        new = [w for w in learning if w in words][:NEW_PER_SENTENCE]
+        if not (new if self.learn_new else review):
+            self.save(update_fields=["upcoming"])
+            return None
+        self.current = {"sentence": sentence.id, "review": review, "learning": new}
+        self.save(update_fields=["current", "upcoming"])
+        return sentence
+
+
+    def _pick_sentence(self, due, learning, statuses, teachable, readable=None):
+        """Pick a single sentence (see _choose_sentence), set it as current and return it (None if no sentence has a
+        target word). readable: readable_kanji's answer, if the caller has it."""
+        choice = self._choose_sentence(due, learning, statuses, teachable, readable or self.readable_kanji(teachable))
+        if not choice:
+            return None
+        sentence_id, review, learning = choice
+        self.current = {"sentence": sentence_id, "review": review, "learning": learning}
+        self.save(update_fields=["current"])
+        return Sentence.objects.get(id=sentence_id)
+
+
+    def _choose_sentence(self, due, learning, statuses, teachable, readable, avoid=None):
+        """Choose a single sentence: (id, due words it grades, warm-up words it grades), or None if no sentence has a
+        target word. `avoid`: a sentence id that mustn't be chosen (the one being typed, when prefetching).
 
         due: every due word, most overdue first; sentences are looked for around the first DUE_TARGETS of them.
+        The owner's bookmark logic: sentences are ranked by their hardest kanji and stored in that order, and a
+        target word's sentences are only searched up to the learner's bookmark (see readable_kanji), or up to the
+        word's own rank for a word learned out of order. Of those, only sentences whose kanji are all readable are
+        eligible; if none are, the ones with the fewest unreadable kanji ("try not to show" them).
         The best sentence covers the most target words while containing as few never-seen words as possible.
         A sentence grades every due word in it and up to NEW_PER_SENTENCE warm-up words (in the learning order),
         so one with more of them scores higher. While learning is on, every sentence has at least one warm-up word:
         only sentences containing one are eligible (falling back to all candidates if somehow none do). Only
         standalone sentences are served: passage-only lines would make no sense out of context.
         """
-        through = Sentence.words.through
-        candidates = set()
-        for word_id in due[:DUE_TARGETS] + learning:
-            ids = list(
-                through.objects.filter(word_id=word_id, sentence__standalone=True).values_list("sentence_id", flat=True)[:5000]
-            )
-            candidates.update(random.sample(ids, min(len(ids), CANDIDATES_PER_WORD)))
-        if not candidates:
+        readable, reach = readable
+        targets = due[:DUE_TARGETS] + learning
+        ranks, bounds = dict(Word.objects.filter(id__in=targets).values_list("id", "rank")), {}
+        for word_id in targets:
+            bound = max(reach, ranks[word_id])
+            for sentence_id in sample_sentences(word_id, *sentence_range(ranks[word_id], bound), CANDIDATES_PER_WORD):
+                bounds[sentence_id] = max(bounds.get(sentence_id, bound), bound)
+        unreadable = {
+            sentence_id: len(set(KANJI_RE.findall(text)) - readable - set(NOT_KANJI))
+            for sentence_id, text, rank in Sentence.objects.filter(id__in=bounds).values_list("id", "text", "rank")
+            if rank <= bounds[sentence_id] and sentence_id != avoid  # a passage line later added to the corpus keeps its id
+        }
+        if not unreadable:
             return None  # the target words only appear in passages
 
+        through = Sentence.words.through
         words_in = defaultdict(set)
-        for sentence_id, word_id in through.objects.filter(sentence_id__in=candidates).values_list("sentence_id", "word_id"):
+        for sentence_id, word_id in through.objects.filter(sentence_id__in=unreadable).values_list("sentence_id", "word_id"):
             words_in[sentence_id].add(word_id)
         recent, due_rank = set(self.recent), {word_id: rank for rank, word_id in enumerate(due)}
 
-        pool = sorted(candidates)
+        pool = sorted(unreadable)
         if learning:
             with_learning = [sid for sid in pool if words_in[sid] & set(learning)]
             pool = with_learning or pool
+        fewest = min(unreadable[sid] for sid in pool)
+        pool = [sid for sid in pool if unreadable[sid] == fewest]
         best, best_score = None, None
         for sentence_id in random.sample(pool, len(pool)):
             words = words_in[sentence_id]
@@ -597,11 +803,7 @@ class Learner(models.Model):
             score = 3 * len(due_hits) + 2 * len(learning_hits) - 2 * unseen - 5 * (sentence_id in recent)
             if best_score is None or score > best_score:
                 best, best_score = (sentence_id, due_hits, learning_hits), score
-
-        sentence_id, review, learning = best
-        self.current = {"sentence": sentence_id, "review": review, "learning": learning}
-        self.save(update_fields=["current"])
-        return Sentence.objects.get(id=sentence_id)
+        return best
 
 
     def _pick_passage(self):
@@ -631,8 +833,8 @@ class Learner(models.Model):
         learning, window = [], []
         if self.learn_new:
             learning = list(self.words.filter(status=UserWord.LEARNING)
-                            .order_by("-word__list_level", "-word__frequency", "word_id").values_list("word_id", flat=True))
-            window = self._new_word_window()
+                            .order_by("word__rank", "-word__list_level", "-word__frequency", "word_id").values_list("word_id", flat=True))
+            window = self._new_word_window(teachable_words())
         due_rank = {word_id: rank for rank, word_id in enumerate(due)}
         new_rank = {word_id: rank for rank, word_id in enumerate(learning + window)}  # warm-up words first
         targets = due[:PASSAGE_DUE_TARGETS] + learning + window
@@ -689,11 +891,11 @@ class Learner(models.Model):
         return Sentence.objects.get(id=self.current["sentence"])
 
 
-    def _new_word_window(self):
+    def _new_word_window(self, teachable):
         """The next NEW_WORD_WINDOW words to learn, in the learning order (see _fill_learning_pool), for paragraph
         mode to bring in. Words met on the way that are made only of known kanji become known, as there."""
         known_set, window, known_rows = set(self.known_kanji), [], []
-        for word_id, text in self._unmet_words().iterator():
+        for word_id, text in self._unmet_words(teachable):
             if made_of_known_kanji(text, known_set):
                 known_rows.append(UserWord(learner=self, word_id=word_id, status=UserWord.KNOWN))
             else:
@@ -896,18 +1098,17 @@ class Learner(models.Model):
         return following or {}
 
 
-    def _fill_learning_pool(self):
-        """Top the learning pool up with the next words the user hasn't met yet, in the JLPT list's order: every N5
-        word before any N4 word and so on, most frequent first within a level (see _unmet_words).
-        Words added to the corpus after onboarding (or 々 words left unmet by an older onboarding) are checked
-        against the known kanji here, and become known."""
+    def _fill_learning_pool(self, teachable):
+        """Top the learning pool up with the next words the user hasn't met yet, in the learning order: kanji by
+        kanji, N5 to N1 (see learning_order). Words added to the corpus after onboarding (or 々 words left unmet by
+        an older onboarding) are checked against the known kanji here, and become known."""
         missing = LEARNING_POOL - self.words.filter(status=UserWord.LEARNING).count()
         if missing <= 0:
             return
 
         known_set = set(self.known_kanji)
         new_rows = []
-        for word_id, text in self._unmet_words().iterator():
+        for word_id, text in self._unmet_words(teachable):
             known = made_of_known_kanji(text, known_set)
             new_rows.append(UserWord(learner=self, word_id=word_id, status=UserWord.KNOWN if known else UserWord.LEARNING))
             missing -= not known
@@ -916,15 +1117,28 @@ class Learner(models.Model):
         UserWord.objects.bulk_create(new_rows, batch_size=1000, ignore_conflicts=True)  # two requests at once may add the same words
 
 
-    def _unmet_words(self):
-        """(id, text) of the words the learner hasn't met yet, in the learning order: level on the JLPT list (N5 first),
-        most frequent first within a level. Only words on the list, and only those in a standalone sentence
-        (frequency > 0), so sentence mode can serve them."""
-        return (
-            Word.objects.filter(list_level__isnull=False, frequency__gt=0)
-            .exclude(id__in=UserWord.objects.filter(learner=self).values("word_id"))
-            .order_by("-list_level", "-frequency", "id").values_list("id", "text")
-        )
+    def _unmet_words(self, teachable):
+        """(id, text) of the words the learner hasn't met yet, in the learning order (see learning_order). Only words
+        on the list, and only those in a standalone sentence (frequency > 0), so sentence mode can serve them."""
+        met = set(self.words.values_list("word_id", flat=True))
+        return [(id, text) for id, text, _ in learning_order(teachable) if id not in met]
+
+
+    def release_warmups(self, teachable, apply=False):
+        """Warm-up words (no FSRS card yet) from a stage past the one the learner is on: the old order, by vocabulary
+        level alone, brought in words like 財布 (an N5 word with an N2 kanji) early. They go back to unmet and come
+        again at their stage. Words made of known kanji stay (they're there because they were looked up with Tab).
+        Returns the released words' texts; only deletes them when `apply`."""
+        order, met = learning_order(teachable), set(self.words.values_list("word_id", flat=True))
+        current = next((stage for id, _, stage in order if id not in met), None)
+        if current is None:
+            return []
+        stages, known_set = {id: stage for id, _, stage in order}, set(self.known_kanji)
+        rows = [(row.id, row.word.text) for row in self.words.filter(status=UserWord.LEARNING, card__isnull=True).select_related("word")
+                if stages.get(row.word_id, 0) < current and not made_of_known_kanji(row.word.text, known_set)]
+        if apply:
+            UserWord.objects.filter(id__in=[id for id, _ in rows]).delete()
+        return [text for _, text in rows]
 
 
 class UserWord(models.Model):

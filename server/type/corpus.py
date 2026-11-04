@@ -290,6 +290,39 @@ def jlpt_level(text):
     return min((levels.get(kanji, 0) for kanji in KANJI_RE.findall(text) if kanji not in "々〆ヶ"), default=0)
 
 
+BEYOND = 9999  # rank of a text with a kanji that isn't on the JLPT lists: after every list kanji
+
+
+@lru_cache(maxsize=1)
+def kanji_order():
+    """Kanji -> its place in the learning order (0 = the first N5 kanji): the JLPT lists from N5 to N1, each in
+    its own order, as on the onboarding page. Kanji are learned in this order, and sentences are ranked by it."""
+    with open(settings.ASSETS_DIR / "jlpt_kanji.json", encoding="utf-8") as file:
+        lists = json.load(file)
+    return {kanji: rank for rank, kanji in enumerate(kanji for level in range(5, 0, -1) for kanji in lists[f"N{level}"])}
+
+
+def kanji_rank(text):
+    """A sentence's (or word's) rank is its hardest kanji: the one latest in the learning order (kanji_order).
+    -1 with no kanji, BEYOND with a kanji off the JLPT lists. 々 〆 ヶ don't count, as in jlpt_level."""
+    order = kanji_order()
+    return max((order.get(kanji, BEYOND) for kanji in KANJI_RE.findall(text) if kanji not in "々〆ヶ"), default=-1)
+
+
+@lru_cache(maxsize=1)
+def level_starts():
+    """The rank of each level's first kanji, N5 first: [0, 109, 254, 616, 985] with the current lists."""
+    levels, order = jlpt_kanji(), kanji_order()
+    return [min(rank for kanji, rank in order.items() if levels[kanji] == level) for level in range(5, 0, -1)]
+
+
+def rank_level(rank):
+    """The JLPT level (5 = N5 ... 1 = N1) of the kanji at this rank: 5 for -1 (no kanji), 0 for BEYOND."""
+    if rank >= BEYOND:
+        return 0
+    return 5 - sum(rank >= start for start in level_starts()[1:])
+
+
 def kanji_info(text):
     """On/kun readings and meanings for each kanji in the text, for the kanji cards."""
     data = kanji_dictionary()

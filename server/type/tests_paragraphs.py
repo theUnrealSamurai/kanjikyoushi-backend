@@ -9,7 +9,8 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from .models import (
-    Learner, Passage, PassageSentence, ReviewLog, Sentence, UserWord, Word, graded_new_words, line_targets, n5_kanji,
+    Learner, Passage, PassageSentence, ReviewLog, Sentence, UserWord, Word, graded_new_words, learning_order, line_targets,
+    n5_kanji, teachable_words,
 )
 from .tests import NO_DICTIONARY, build_corpus
 
@@ -231,7 +232,7 @@ class ParagraphTests(TestCase):
 
         payload = self.next()
         self.assertEqual(payload["passage"]["id"], big.id)
-        order = list(Word.objects.filter(text__in=WINDOW).order_by("-list_level", "-frequency", "id").values_list("text", flat=True))
+        order = [text for _, text, _ in learning_order(teachable_words()) if text in WINDOW]
         new = {"学生", *order[:4]}  # the warm-up word first, then the window in the learning order: 5 in all
         self.assertEqual(set(learner.words.filter(status=UserWord.LEARNING).values_list("word__text", flat=True)), new)
         self.assertFalse(learner.words.filter(word__text__in=order[4:]).exists())  # the rest stay unmet

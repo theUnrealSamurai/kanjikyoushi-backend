@@ -20,7 +20,7 @@ from .corpus import (
 )
 from .dictionary import cached_dictionary, find_kana_meanings, find_meanings, index_by_kana, index_by_kanji
 from . import models
-from .models import WARMUP_SIGHTINGS, KanaWord, Learner, ReviewLog, Sentence, SentenceLog, UserWord, Word
+from .models import WARMUP_SIGHTINGS, KanaWord, Learner, ReviewLog, Sentence, SentenceLog, UserWord, Word, teachable_words
 
 
 SENTENCES = [
@@ -328,10 +328,10 @@ class LearningFlowTests(TestCase):
         self.assertEqual(learner.words.get(word__text="人々").status, UserWord.KNOWN)  # 々 isn't a kanji to know
         # Words met later (added to the corpus, or left unmet by an older onboarding) become known on the way.
         days = Word.objects.create(text="日々", reading="ひび", jlpt=5, list_level=5, frequency=99)  # first in the learning order
-        self.assertNotIn(days.id, learner._new_word_window())
+        self.assertNotIn(days.id, learner._new_word_window(teachable_words()))
         self.assertEqual(learner.words.get(word=days).status, UserWord.KNOWN)
         times = Word.objects.create(text="時々", reading="ときどき", jlpt=5, list_level=5, frequency=99)
-        learner._fill_learning_pool()
+        learner._fill_learning_pool(teachable_words())
         self.assertEqual(learner.words.get(word=times).status, UserWord.KNOWN)
 
     def test_new_words_come_in_list_order_then_by_frequency_and_only_from_the_list(self):
@@ -345,12 +345,12 @@ class LearningFlowTests(TestCase):
             Word.objects.create(text=text, reading=reading, jlpt=3, list_level=level, frequency=frequency)
 
         with patch.object(models, "LEARNING_POOL", 5):
-            learner._fill_learning_pool()
+            learner._fill_learning_pool(teachable_words())
         pool = set(learner.words.filter(status=UserWord.LEARNING).values_list("word__text", flat=True))
         self.assertEqual(pool, {"部屋", "犬", "頭", "持つ", "剣"})  # 剣 beats 剣士 on frequency
         learner.words.all().delete()
         for _ in range(3):
-            learner._fill_learning_pool()
+            learner._fill_learning_pool(teachable_words())
             learner.words.filter(status=UserWord.LEARNING).update(status=UserWord.REVIEW)
         self.assertFalse(learner.words.filter(word__text__in=("魔物", "侏儒")).exists())  # not on the list: never taught
 
@@ -449,7 +449,8 @@ class LearningFlowTests(TestCase):
                          {"kanji", "on_readings", "kun_readings", "meanings"})
         self.assertEqual(
             set(payload),
-            {"sentence_id", "text", "translation", "romaji", "tokens", "words", "kana_words", "extra_words", "stats", "passage"},
+            {"sentence_id", "text", "translation", "romaji", "tokens", "words", "kana_words", "extra_words", "stats", "passage",
+             "prefetch"},
         )
         self.assertIsNone(payload["passage"])  # sentence mode
 
@@ -603,28 +604,29 @@ class LearningFlowTests(TestCase):
         self.assertEqual(learner.current, {})
 
     def test_review_mode_brings_in_no_new_words_and_grades_only_due_words(self):
-        learner = self.onboard()
-        self.give_due(learner, {"先生": 1})
+        learner = self.onboard("今日")  # so the sentence below has no kanji the learner can't read
+        self.give_due(learner, {"会議": 1})  # the hardest word: its sentences are searched up to 議, so this one is in
         teacher, meeting = Word.objects.get(text="先生"), Word.objects.get(text="会議")
-        UserWord.objects.create(learner=learner, word=meeting, status=UserWord.LEARNING)  # being warmed up
+        UserWord.objects.create(learner=learner, word=teacher, status=UserWord.LEARNING)  # being warmed up
         # Steer the picker to the sentence with both words.
-        learner.recent = list(Sentence.objects.filter(words=teacher).exclude(words=meeting).values_list("id", flat=True))
+        learner.recent = list(Sentence.objects.filter(words=meeting).exclude(words=teacher).values_list("id", flat=True))
         learner.save()
+        met = learner.words.count()
 
         response = self.set_mode(False)
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["text"], "今日は先生と会議があります。")
-        self.assertEqual(self.word_ids(payload, "review"), [teacher.id])
+        self.assertEqual(self.word_ids(payload, "review"), [meeting.id])
         self.assertEqual(self.word_ids(payload, "learning"), [])
-        self.assertEqual(self.word_ids(payload, "unseen").count(meeting.id), 1)  # a warm-up word left alone: furigana shown
-        self.assertEqual(learner.words.count(), 2)  # no new words were added
+        self.assertEqual(self.word_ids(payload, "unseen").count(teacher.id), 1)  # a warm-up word left alone: furigana shown
+        self.assertEqual(learner.words.count(), met)  # no new words were added
 
         done = self.submit(payload).json()
         self.assertTrue(done["done"])  # nothing else is due
-        self.assertIsNotNone(learner.words.get(word=teacher).card)
-        self.assertEqual(learner.words.get(word=meeting).sightings, 0)
-        self.assertEqual(learner.words.get(word=meeting).status, UserWord.LEARNING)
+        self.assertIsNotNone(learner.words.get(word=meeting).card)
+        self.assertEqual(learner.words.get(word=teacher).sightings, 0)
+        self.assertEqual(learner.words.get(word=teacher).status, UserWord.LEARNING)
 
     def test_review_mode_with_nothing_due_is_done_and_learning_resumes_when_switched_back(self):
         self.onboard()

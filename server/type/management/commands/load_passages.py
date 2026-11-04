@@ -10,7 +10,7 @@ from pathlib import Path
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
-from type.corpus import jlpt_level
+from type.corpus import jlpt_level, kanji_rank
 from type.jlpt_list import apply_list_levels
 from type.models import KanaWord, Passage, PassageSentence, Sentence, Word
 
@@ -116,7 +116,7 @@ class Command(BaseCommand):
             word_ids = {(text, reading): id for id, text, reading in Word.objects.values_list("id", "text", "reading")}
             new = [row for row in dictionary["words"] if (row[0], row[1]) not in word_ids]
             Word.objects.bulk_create(
-                [Word(text=text, reading=reading, jlpt=jlpt, meanings=meanings) for text, reading, jlpt, meanings in new],
+                [Word(text=text, reading=reading, jlpt=jlpt, rank=kanji_rank(text), meanings=meanings) for text, reading, jlpt, meanings in new],
                 batch_size=1000, ignore_conflicts=True,
             )
             kana_ids = {(text, reading, lemma): id
@@ -138,7 +138,7 @@ class Command(BaseCommand):
         """The id for a word key; a word the dictionary line missed is created on the spot."""
         key = tuple(key)
         if key not in word_ids:
-            word_ids[key] = Word.objects.get_or_create(text=key[0], reading=key[1], defaults={"jlpt": jlpt_level(key[0])})[0].id
+            word_ids[key] = Word.objects.get_or_create(text=key[0], reading=key[1], defaults={"jlpt": jlpt_level(key[0]), "rank": kanji_rank(key[0])})[0].id
         return word_ids[key]
 
     def kana_id(self, key, kana_ids):
@@ -161,7 +161,7 @@ class Command(BaseCommand):
         to_create = [text for text in missing if text not in sentence_ids]
         rows = [
             Sentence(
-                text=text, romaji=wanted[text].get("romaji", ""), standalone=False,
+                text=text, romaji=wanted[text].get("romaji", ""), standalone=False, rank=kanji_rank(text),
                 tokens=[
                     [surface, reading, self.word_id(word, word_ids) if word else None,
                      self.kana_id(kana, kana_ids) if kana else None]
