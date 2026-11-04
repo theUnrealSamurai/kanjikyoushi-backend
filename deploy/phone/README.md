@@ -1,8 +1,9 @@
 # Running KanjiKyoushi on a phone
 
 The whole app (Django backend and Next.js frontend) runs on a rooted Xiaomi Redmi 12 5G (XIG03, Japan) at
-home, inside a Debian chroot. It is private: Tailscale Serve makes it reachable only from devices in the
-owner's tailnet and from the few friends the phone is shared with. There is no public URL (no Funnel). The phone
+home, inside a Debian chroot. It is public through Tailscale Funnel at `https://kanjikyoushi.tail96317d.ts.net`,
+with invite-only signup. The home router has no open ports: the phone keeps an outgoing connection to Tailscale's
+relays, and they forward visitors to it. The phone
 has an unlocked bootloader and Magisk. The scripts here set it up and deploy to it over adb from the Mac.
 
 **The database holds every user's progress.** It lives at `/srv/kanjikyoushi/data/db.sqlite3` inside the
@@ -27,15 +28,15 @@ processes and restarts any that exit. `battery.sh` is independent of the app (se
 The browser only talks to Next.js. The frontend is built with `NEXT_PUBLIC_HOST=/api`, and `next.config.mjs`
 rewrites only `/api/home/*` and `/api/type/*` to Django on `127.0.0.1:8000`. Nothing else is forwarded, so
 Django's admin and JWT token views are not reachable from outside (they 404). The site has two ways in and no
-others: Tailscale (Serve hands it HTTPS requests from the tailnet, over loopback) and the home Wi-Fi, at
-`http://<phone's IP>:3000` (plain HTTP, home only; currently `http://192.168.3.88:3000`). Never the internet.
+others: Tailscale (Funnel hands it HTTPS requests from anyone on the internet, over loopback) and the home Wi-Fi,
+at `http://<phone's IP>:3000` (plain HTTP, home only; currently `http://192.168.3.88:3000`).
 
 Layout inside the chroot, under `/srv/kanjikyoushi/`:
 
 | Path | What |
 |---|---|
 | `data/db.sqlite3` | the database, owned by `kanji` |
-| `env` | `DJANGO_DEBUG=0`, `DJANGO_SECRET_KEY` (random, generated once), `DJANGO_ALLOWED_HOSTS`, `DJANGO_SQLITE_PATH`, `DJANGO_CACHE_DIR` (`data/cache`), `DJANGO_NUM_PROXIES=1` (Tailscale adds the client address; Next.js passes it on unchanged) |
+| `env` | `DJANGO_DEBUG=0`, `DJANGO_SECRET_KEY` (random, generated once), `DJANGO_ALLOWED_HOSTS`, `DJANGO_SQLITE_PATH`, `DJANGO_CACHE_DIR` (`data/cache`), `DJANGO_NUM_PROXIES=1` (Tailscale sets the client address, replacing any the client sent; Next.js passes it on unchanged) |
 | `backend/`, `frontend/` | current release; the previous one stays as `backend.old/`, `frontend.old/` |
 | `venv/` | shared virtualenv, outside the code so swapping code never breaks it |
 | `logs/` | `tailscaled.log`, `backend.log`, `frontend.log` (trimmed to 1 MB once over 10 MB) |
@@ -46,8 +47,9 @@ cutlet, UniDic and psycopg. To change the corpus, run it on the Mac and ship the
 
 ## Security
 
-- Nothing is public. Tailscale Serve (never Funnel) only answers devices in the tailnet and people the phone is
-  shared with; to everyone else on the internet the site doesn't exist.
+- The site is public through Funnel, and nothing else is: the router has no open ports, and the site's DNS name
+  points at Tailscale's relays, so the home IP stays hidden. TLS ends on the phone, so the relays can't read the
+  traffic. The name is in public certificate logs, so expect bots on the login and signup pages.
 - Signup is invite-only (see "Invite codes").
 - Rate limits (`settings.py`): anonymous 60/min, signed-in users 300/min, login 10/hour per account name,
   signup 5/hour per IP. The counters live in a file cache (`DJANGO_CACHE_DIR`) shared by the gunicorn workers.
@@ -122,13 +124,13 @@ Run these once, inside the chroot (see "Getting a shell"):
 
 ```bash
 tailscale up --hostname=kanjikyoushi   # prints a login link; open it and approve the device
-tailscale serve --bg 3000              # tailnet-only HTTPS; the first time, it links to where you enable Serve
+tailscale funnel --bg 3000             # public HTTPS; the first time, it links to where you enable Funnel
 ```
 
-The site is then `https://kanjikyoushi.<tailnet>.ts.net` (here `kanjikyoushi.tail96317d.ts.net`), for your own
-devices running Tailscale. To let a friend in, share the machine with them from the admin console (Machines >
-kanjikyoushi > Share); they install Tailscale, accept, and open the same URL. Don't use `tailscale funnel`: that
-would make it public. The login and serve config live in `/var/lib/tailscale` and survive reboots.
+The site is then `https://kanjikyoushi.<tailnet>.ts.net` (here `kanjikyoushi.tail96317d.ts.net`) for anyone.
+Friends don't need Tailscale: send them the URL and an invite code. To make it tailnet-only again, run
+`tailscale funnel --https=443 off` and then `tailscale serve --bg 3000`. The login and funnel config live in
+`/var/lib/tailscale` and survive reboots.
 
 Worth doing in the admin console: an access rule so the phone itself can't start connections to your other
 tailnet devices (tag it and give the tag no outgoing access). Then a compromised phone stays a dead end.

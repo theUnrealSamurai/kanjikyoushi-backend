@@ -27,6 +27,7 @@ Rules for anyone (human or AI) working on KanjiKyoushi, compiled from the owner'
 - A new word's first sighting is a test, with furigana hidden: typed without help (no Tab, help mode or ⌥Tab), it skips the warm-up and gets its FSRS card straight away. Otherwise it gets the warm-up (3 typings in all, furigana showing), then an FSRS card. Trust FSRS scheduling; there are no flashcards to rate.
 - Reviews are graded only by whether you needed the reading: no help is Good, needing Tab (or help mode) for the reading is Hard. Typos never count.
 - Due words are typed with furigana hidden.
+- Always type the whole sentence, never just the graded words. Typing only the new and due words was proposed and rejected (owner, 2026-10-28: "this is a bad idea"). The whole sentence is the check on every other word in it: if you can't recall a word that isn't due, or one you were assumed to know, you have to look it up with Tab and pay for it (a known word goes back to the warm-up, a learned one is reviewed as Hard). Skip typing it and you never find out you forgot it.
 - Sentence picking prefers the sentence covering the most due words (a sentence with 4 due words beats one with 2), while containing as few not-yet-taught words as possible.
 - While "Learn new words" is on, every sentence contains at least one new word.
 - Review mode (switch off) targets only due words. No new words come in, warm-up words are left alone, and when nothing is due the user is done.
@@ -36,7 +37,7 @@ Rules for anyone (human or AI) working on KanjiKyoushi, compiled from the owner'
 
 - One row holds: the "Learn new words" switch (on = learn new words, off = review), the circular ⓘ beside it, a "See what's due" button to the left of the switch, and a counter of new words learned today.
 - The ⓘ appears only when there are due words. Clicking it shows the due counts and the nudge to finish due words first.
-- "See what's due" is a simple button in that same row. It opens a panel on the right listing the due words and kanji.
+- "See what's due" is a simple button in that same row. It opens a panel on the right listing the due words and kanji. The button shows the due counts, e.g. "See what's due · 12 words · 5 kanji" (owner, 2026-11-04).
 - Never show answers while the user is typing. The due list shows only the kanji and words, with no readings or meanings.
 - Keep the UI simple and uncluttered. Prefer one clear control over scattered ones.
 
@@ -54,7 +55,7 @@ Rules for anyone (human or AI) working on KanjiKyoushi, compiled from the owner'
 ## Deployment and operations
 
 - The app is self-hosted on the owner's spare Android phone (rooted, Debian chroot) on home Wi-Fi, running all day. It serves at most 4 or 5 users (the owner and a few friends). Do not propose paid hosting.
-- Access is private only. Serve over a private Tailscale network and share with friends via node sharing. Never open a public tunnel (no Tailscale Funnel or similar) and never tunnel into the home network.
+- The site is public through Tailscale Funnel (owner, 2026-10-28), so friends need only the URL and an invite code. Funnel was chosen over ngrok because TLS ends on the phone and the home IP stays hidden. Never open router ports, never expose anything but the web port, and never tunnel into the home network.
 - Signup is invite-only. Keep rate limits on login, signup and the API. Block the admin from the outside. Only the needed API routes are forwarded.
 - SSH to the phone is allowed from the home Wi-Fi only. The firewall admits the web port only from loopback and private LAN ranges.
 - Never overwrite the phone's database. It holds every user's progress. Back it up before any change that touches data.
