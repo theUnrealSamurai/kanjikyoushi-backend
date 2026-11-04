@@ -34,6 +34,9 @@ trim_logs() {  # keep the last 1 MB of any log over 10 MB; rewrite in place so o
 supervise() {
     echo $$ > "$PIDFILE"
     echo -900 > /proc/self/oom_score_adj  # Android's low-memory killer takes apps long before these
+    # The same start whoever runs this (boot, swap_db.sh, an SSH shell): the app user can't enter /root, and node
+    # is only on chroot.sh's PATH.
+    cd / && export HOME=/root PATH=/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     set -a; . "$APP/env"; set +a
     mkdir -p /run/tailscale /run/sshd
 
