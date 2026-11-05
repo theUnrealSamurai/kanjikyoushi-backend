@@ -9,7 +9,7 @@ from django.contrib.auth.models import User
 from django.db import connection, models, transaction
 from django.db.models import Q
 from django.utils import timezone
-from fsrs import Card, Rating, Scheduler
+from fsrs import Card, Rating, Scheduler, State
 
 from .corpus import (BEYOND, KANJI_RE, furigana, has_kanji, jlpt_kanji, kanji_dictionary, kanji_info, kanji_order,
                      kanji_rank, rank_level, reading_units, same_text)
@@ -19,7 +19,13 @@ scheduler = Scheduler()
 
 DEFAULT_KNOWN_KANJI = "一二三四五六七八九十百千万"
 LEARNING_POOL = 10          # new words being warmed up at any one time: enough for most sentences to hold NEW_PER_SENTENCE
-WARMUP_SIGHTINGS = 3        # a new word is typed this many times (with furigana) before reviews start, unless it passes its test
+WARMUP_SIGHTINGS = 3        # a new word is typed this many times before reviews start, unless it passes its test; the last
+                            # typing is the warm-up check (furigana hidden), which sets the card's first rating
+CHECK_DELAY = timedelta(hours=20)  # a learned word whose reading you looked up comes back for its check this much later:
+                                   # the next day, so it tests memory, not the reading you just saw (owner, 2026-11-05)
+EASY_READS = 2              # clean reads of a learned word while it isn't due (one a day, not on its review day) that make
+                            # its next clean review Easy
+MISSES = (Rating.Again, Rating.Hard)  # a look-up right after one of these is a second miss in a row: Again
 NEW_PER_SENTENCE = 2        # at most this many new words are graded in one sentence (or passage line); every due word is
 DUE_TARGETS = 12            # how many of the most overdue words to look for sentences for
 CANDIDATES_PER_WORD = 200   # sentences sampled per target word when picking the next sentence
@@ -142,7 +148,7 @@ def sample_sentences(word_id, first, last, count):
 
 def word_role(word_id, review, learning, statuses, testing=frozenset()):
     """A token's role: "review" (graded, furigana hidden until Tab), "learning" (new word, furigana shown),
-    "test" (a new word on its first sighting, furigana hidden until Tab: typed without help, it skips the warm-up),
+    "test" (a new word on its first sighting or its warm-up check, furigana hidden until Tab: see Learner.submit),
     "unseen" (not taught yet, furigana shown), "known" (furigana hidden), None (kana/punctuation).
     A warm-up word that isn't graded here (review mode, or graded on an earlier line) counts as "unseen"."""
     if word_id is None:
@@ -184,6 +190,31 @@ def sentence_tokens(sentence, review, learning, statuses, kana_with_meanings, te
             start = None
         token["extra"] = start
     return tokens
+
+
+GRADE_OUTCOMES = ("easy", "good", "hard", "again", "check", "warmup")  # what submit can do to a word (see token_grade)
+
+
+def token_grade(role, user_word):
+    """What the line being typed does to a token's word, for the page to flash once the word is typed:
+    {"clean", "tab", "skip"} -> the outcome (one of GRADE_OUTCOMES, or None: nothing to show) when it is typed without
+    help, after its reading was revealed (Tab or help mode), or after ⌥Tab. None for a word nothing can happen to.
+    Mirrors Learner.submit; user_word is the learner's row for the word (None if they have none)."""
+    if user_word is None:
+        return None
+    if role == "review":
+        if user_word.owes_check:
+            return {"clean": "hard", "tab": "again", "skip": None}
+        return {"clean": "easy" if user_word.easy_ready() else "good", "tab": user_word.look_up_outcome(), "skip": None}
+    if role == "test":
+        if user_word.sightings == 0:
+            return {"clean": "easy", "tab": "warmup", "skip": "warmup"}
+        return {"clean": "good", "tab": "hard", "skip": None}  # the warm-up check
+    if role == "known" and user_word.status == UserWord.KNOWN:
+        return {"clean": None, "tab": "warmup", "skip": None}
+    if role == "known" and user_word.status == UserWord.REVIEW:
+        return {"clean": None, "tab": user_word.look_up_outcome(), "skip": None}
+    return None
 
 
 def extra_cards(sentence, tokens):
@@ -949,14 +980,19 @@ class Learner(models.Model):
                            "meanings": kana[kana_id].meanings, "kanji": []}
             for kana_id in kana_ids(sentence) if kana_id in kana
         }
-        # New words on their first sighting are tested: furigana hidden on every line until Tab (see submit).
+        # New words on their first sighting and at their warm-up check are tested: furigana hidden on every line until
+        # Tab (see submit). In a passage, only the ones no earlier line has graded (one graded there has moved on).
         testing = set(self.words.filter(
-            word_id__in=self.current["targets"]["learning"] if lines else self.current["learning"],
-            status=UserWord.LEARNING, sightings=0,
+            Q(sightings=0) | Q(sightings__gte=WARMUP_SIGHTINGS - 1),
+            word_id__in=set(self.current["targets"]["learning"]) - set(self.current["assigned"]) if lines else self.current["learning"],
+            status=UserWord.LEARNING,
         ).values_list("word_id", flat=True))
         can_read = self.reader([sentence, *(line.sentence for line in lines)])
         tokens = sentence_tokens(sentence, set(self.current["review"]), set(self.current["learning"]), statuses, kana, testing,
                                  can_read)
+        rows = {row.word_id: row for row in self.words.filter(word_id__in={t["word"] for t in tokens if t["word"]})}
+        for token in tokens:
+            token["grade"] = token_grade(token["role"], rows.get(token["word"]))
         extra_words = extra_cards(sentence, tokens)
         # Dictionary data for the page's cards; the keys are word ids as strings (JSON object keys).
         graded = {t["word"] for t in tokens if t["word"]}  # every word, so Tab can open the card of whichever comes next
@@ -1029,17 +1065,25 @@ class Learner(models.Model):
         }
 
 
-    def submit(self, sentence_id, typed, revealed=(), skipped=()):
+    def submit(self, sentence_id, typed, revealed=(), skipped=(), help=False):
         """Grade the sentence that was just typed. Typos never count: only whether you needed the reading.
+        Returns {word id: outcome} for the words it graded or changed (see GRADE_OUTCOMES), which the page flashes.
 
-        Review words: reading revealed (Tab or help mode) -> Hard, otherwise -> Good.
-        Skipped review words (you asked how to type them: you know the reading, not the keystrokes) aren't
-        graded at all and stay due, unless you had also revealed the reading.
-        New words: count one more sighting; after WARMUP_SIGHTINGS they get an FSRS card and start reviews.
-        On its first sighting a new word is a test (furigana hidden): typed without help (no Tab, help mode or ⌥Tab),
-        you already know it, so it skips the rest of the warm-up and starts reviews now.
-        Words you were assumed to know but looked up with Tab: a known word goes back to the warm-up
-        (furigana shown again; the look-up was its first sighting), a learned word that wasn't due is reviewed as Hard.
+        Due words (owner, 2026-11-05):
+        - typed without help -> Good, or Easy once read clean EASY_READS times since its last review (see easy_ready)
+        - reading revealed (Tab or help mode) -> no rating yet: a check CHECK_DELAY later (the next day), furigana
+          hidden. The check typed clean -> Hard; looked up again -> Again. A look-up right after a miss (last rating
+          Hard or Again) is Again at once: two misses in a row.
+        - skipped (⌥Tab: you know the reading, not the keystrokes) -> not graded and stays due, unless you had also
+          revealed the reading.
+        New words: on the first sighting a new word is a test (furigana hidden): typed without help (no Tab, help mode
+        or ⌥Tab), you already knew it, so its card starts with Easy and the warm-up is skipped. Otherwise it warms up
+        with furigana, and its last warm-up typing (WARMUP_SIGHTINGS) is a check with furigana hidden: clean -> the
+        card starts with Good, Tab -> with Hard (⌥Tab: the check comes again next time).
+        Words you were assumed to know but looked up with Tab: a known word goes back to the warm-up (furigana shown
+        again; the look-up was its first sighting), a learned word that isn't due gets a check (or Again) as above.
+        Learned words that aren't due, read without help (no Tab, ⌥Tab or help mode on this sentence), count a clean
+        read, at most one a day and not on the day of their last review.
         On a passage line, the next line becomes current; after the last line the passage joins recent_passages
         and the next call picks a new one.
         """
@@ -1050,40 +1094,74 @@ class Learner(models.Model):
             raise ValueError("The typed sentence doesn't match.")
 
         now, revealed, skipped = timezone.now(), set(revealed), set(skipped)
-        logs = []  # one ReviewLog per FSRS review of a learned word (not the graduation review)
+        today = now.astimezone(self.zone()).date()
+        logs, outcomes = [], {}  # one ReviewLog per FSRS review of a learned word (not the graduation review)
+
+        def rate(user_word, rating):
+            user_word.review(rating, now)
+            logs.append(ReviewLog(learner=self, word_id=user_word.word_id, rating=rating, at=now))
+            outcomes[user_word.word_id] = rating.name.lower()
+
+        def look_up(user_word):
+            outcomes[user_word.word_id] = user_word.look_up(now)
+            if outcomes[user_word.word_id] == "again":
+                logs.append(ReviewLog(learner=self, word_id=user_word.word_id, rating=Rating.Again, at=now))
+
+        def graduate(user_word, rating):
+            user_word.status = UserWord.REVIEW
+            user_word.review(rating, now)
+            user_word.learned_at = user_word.learned_at or now  # a word sent back to warm-up keeps its first date
+            outcomes[user_word.word_id] = rating.name.lower()
+
         graded = list(self.words.filter(word_id__in=self.current["review"] + self.current["learning"]))
         for user_word in graded:
-            if user_word.word_id in self.current["review"]:
-                if user_word.word_id in skipped and user_word.word_id not in revealed:
-                    continue
-                rating = Rating.Hard if user_word.word_id in revealed else Rating.Good
-                user_word.review(rating, now)
-                logs.append(ReviewLog(learner=self, word_id=user_word.word_id, rating=rating, at=now))
+            word_id = user_word.word_id
+            if word_id in self.current["review"]:
+                if word_id in revealed:
+                    look_up(user_word)
+                elif word_id not in skipped:
+                    rate(user_word, Rating.Hard if user_word.owes_check else Rating.Easy if user_word.easy_ready() else Rating.Good)
+            elif user_word.sightings == 0:  # the first-sighting test
+                user_word.sightings = 1
+                if word_id in revealed | skipped:
+                    outcomes[word_id] = "warmup"
+                else:
+                    graduate(user_word, Rating.Easy)
+            elif user_word.sightings >= WARMUP_SIGHTINGS - 1:  # the warm-up check
+                if word_id in revealed or word_id not in skipped:
+                    user_word.sightings += 1
+                    graduate(user_word, Rating.Hard if word_id in revealed else Rating.Good)
             else:
-                passed_test = user_word.sightings == 0 and user_word.word_id not in revealed | skipped
                 user_word.sightings += 1
-                if passed_test or user_word.sightings >= WARMUP_SIGHTINGS:
-                    user_word.status = UserWord.REVIEW
-                    user_word.review(Rating.Good, now)
-                    user_word.learned_at = user_word.learned_at or now  # a word sent back to warm-up keeps its first date
 
         in_sentence = {token[2] for token in sentence.tokens if token[2]}
-        looked_up = list(self.words.filter(
-            word_id__in=(revealed & in_sentence) - set(self.current["review"] + self.current["learning"])
-        ))
+        graded_ids = set(self.current["review"] + self.current["learning"])
+        looked_up = list(self.words.filter(word_id__in=(revealed & in_sentence) - graded_ids))
         for user_word in looked_up:
             if user_word.status == UserWord.KNOWN:
                 user_word.status, user_word.sightings = UserWord.LEARNING, 1  # not tested again: you just looked it up
+                outcomes[user_word.word_id] = "warmup"
             elif user_word.status == UserWord.REVIEW:
-                user_word.review(Rating.Hard, now)
-                logs.append(ReviewLog(learner=self, word_id=user_word.word_id, rating=Rating.Hard, at=now))
-        UserWord.objects.bulk_update(graded + looked_up, ["status", "sightings", "card", "due", "learned_at"])
+                look_up(user_word)
+
+        read = []
+        if not help:
+            for user_word in self.words.filter(status=UserWord.REVIEW, owes_check=False, due__gt=now,
+                                               word_id__in=in_sentence - graded_ids - revealed - skipped):
+                last = Card.from_dict(user_word.card).last_review if user_word.card else None
+                if user_word.read_on != today and (last is None or last.astimezone(self.zone()).date() != today):
+                    user_word.clean_reads, user_word.read_on = user_word.clean_reads + 1, today
+                    read.append(user_word)
+
+        UserWord.objects.bulk_update(graded + looked_up + read, ["status", "sightings", "card", "due", "learned_at", "owes_check",
+                                                                 "last_rating", "clean_reads", "read_on"])
         ReviewLog.objects.bulk_create(logs)
         SentenceLog.objects.create(learner=self, at=now)
 
         self.recent = (self.recent + [sentence_id])[-RECENT_SENTENCES:]
         self.current = self._next_line() if self.current.get("passage") else {}
         self.save(update_fields=["recent", "current", "recent_passages"])
+        return outcomes
 
 
     def _next_line(self):
@@ -1150,8 +1228,13 @@ class UserWord(models.Model):
     status = models.CharField(max_length=8, choices=STATUSES)
     sightings = models.PositiveSmallIntegerField(default=0)  # times typed while learning
     card = models.JSONField(null=True, blank=True)           # FSRS card, once reviews start
-    due = models.DateTimeField(null=True, blank=True)         # copy of card.due so due words can be queried
+    due = models.DateTimeField(null=True, blank=True)         # copy of card.due so due words can be queried; while a
+                                                              # check is owed, when the check comes up instead
     learned_at = models.DateTimeField(null=True, blank=True)  # when the warm-up finished; null = before history was tracked
+    owes_check = models.BooleanField(default=False, db_default=False)  # reading looked up: owes a check, rated at its next review
+    last_rating = models.PositiveSmallIntegerField(null=True, blank=True)  # last FSRS rating, graduation included
+    clean_reads = models.PositiveSmallIntegerField(default=0, db_default=0)  # read without help while not due, since the last review
+    read_on = models.DateField(null=True, blank=True)          # local day of the last clean read counted (one a day)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["learner", "word"], name="unique_learner_word")]
@@ -1161,9 +1244,31 @@ class UserWord(models.Model):
         return f"{self.learner} · {self.word} · {self.status}"
 
     def review(self, rating, now):
+        """One FSRS review. It settles any check and starts the clean-read count afresh."""
         card = Card.from_dict(self.card) if self.card else Card()
         card, _ = scheduler.review_card(card, rating, now)
         self.card, self.due = card.to_dict(), card.due
+        self.last_rating, self.owes_check, self.clean_reads = int(rating), False, 0
+
+    def easy_ready(self):
+        """A clean review now would be Easy: read clean EASY_READS times since its last review, on other days, while
+        it wasn't due (words seen everywhere move out faster). Only for a card past its learning steps."""
+        return self.clean_reads >= EASY_READS and bool(self.card) and Card.from_dict(self.card).state == State.Review
+
+    def look_up_outcome(self):
+        """What looking up this learned word's reading does: "again" if it already owes a check or its last rating
+        was a miss (two misses in a row, owner, 2026-11-05), else "check" (no rating yet, a check the next day)."""
+        return "again" if self.owes_check or self.last_rating in MISSES else "check"
+
+    def look_up(self, now):
+        """Its reading was looked up (Tab or help mode): Again now, or a check CHECK_DELAY from now (see
+        look_up_outcome). Returns the outcome; an Again needs a ReviewLog, which the caller adds."""
+        outcome = self.look_up_outcome()
+        if outcome == "again":
+            self.review(Rating.Again, now)
+        else:
+            self.owes_check, self.due, self.clean_reads = True, now + CHECK_DELAY, 0
+        return outcome
 
 
 class ReviewLog(models.Model):

@@ -415,9 +415,12 @@ class LearningFlowTests(TestCase):
         self.assertEqual(sorted(self.word_ids(payload, "review")), sorted([teacher.id, meeting.id]))
         self.assertEqual(set(payload["words"]), {str(t["word"]) for t in payload["tokens"] if t["word"]})
 
-        self.assertEqual(self.submit(payload, revealed=[teacher.id], missed=[meeting.id]).status_code, 200)  # missed: ignored
-        cards = {w.word_id: w.card for w in learner.words.filter(status=UserWord.REVIEW)}
-        self.assertGreater(cards[meeting.id]["stability"], cards[teacher.id]["stability"])  # typo ignored: Good beats Hard
+        response = self.submit(payload, revealed=[teacher.id], missed=[meeting.id])  # missed: ignored
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["graded"], {str(meeting.id): "good", str(teacher.id): "check"})
+        self.assertIsNotNone(learner.words.get(word=meeting).card)  # typo ignored: Good
+        looked_up = learner.words.get(word=teacher)
+        self.assertEqual((looked_up.card, looked_up.owes_check), (None, True))  # Tab: no rating yet, a check tomorrow
 
     def test_payload_has_dictionary_data_for_learning_and_review_words(self):
         learner = self.onboard()
@@ -474,7 +477,7 @@ class LearningFlowTests(TestCase):
         skipped = learner.words.get(word=teacher)
         self.assertIsNone(skipped.card)  # untouched: no FSRS review at all
         self.assertEqual(skipped.due, past)  # still due, so it comes back
-        self.assertIsNotNone(learner.words.get(word=meeting).card)  # revealed first: Hard stands
+        self.assertTrue(learner.words.get(word=meeting).owes_check)  # revealed first: the look-up stands
 
     def test_looking_up_a_word_you_were_assumed_to_know(self):
         learner = self.onboard()
@@ -500,7 +503,7 @@ class LearningFlowTests(TestCase):
         self.assertEqual(self.submit(payload, revealed=[meeting.id, known, elsewhere.id]).status_code, 200)
         self.assertEqual(learner.words.get(word_id=known).status, UserWord.LEARNING)  # back to the warm-up
         self.assertEqual(learner.words.get(word_id=known).sightings, 1)  # the look-up was its first sighting: no test
-        self.assertLess(learner.words.get(word_id=meeting.id).due, later)  # reviewed as Hard: comes back sooner
+        self.assertLess(learner.words.get(word_id=meeting.id).due, later)  # owes a check: comes back tomorrow
         self.assertEqual(learner.words.get(word_id=elsewhere.id).status, UserWord.KNOWN)  # not in the sentence
 
     def test_kana_words_come_with_meanings_but_are_never_learned(self):
@@ -754,7 +757,7 @@ class LearningFlowTests(TestCase):
 
         self.submit(self.next(), revealed=[meeting.id])  # 先生 is due and graded; 会議 is learned, looked up
         ratings = dict(ReviewLog.objects.filter(learner=learner).values_list("word_id", "rating"))
-        self.assertEqual(ratings, {teacher.id: 3, meeting.id: 2})  # Good, Hard
+        self.assertEqual(ratings, {teacher.id: 3})  # Good; the look-up isn't rated until its check
         self.assertEqual(SentenceLog.objects.filter(learner=learner).count(), 1)
 
     def test_onboarding_again_clears_the_history(self):

@@ -27,9 +27,13 @@ The frontend lives in [kanjikyoushi-frontend](https://github.com/theUnrealSamura
   run out), and a sentence with a kanji they can't read yet comes up only if nothing else has the words being
   tested. From N2 on, the next sentence is prepared while one is typed (`/type/prefetch`).
 - **Reviews happen while typing.** Each sentence grades every due word in it, with their furigana hidden:
-  - typed without help → Good
-  - needed Tab (or help mode) to see the reading → Hard
-  - typos never count
+  - typed without help → Good, or Easy after 2 clean reads on other days while it wasn't due (`EASY_READS`)
+  - needed Tab (or help mode) to see the reading → no rating yet: the word comes back the next day for a check
+    (`CHECK_DELAY`), clean → Hard, Tab again → Again
+  - a look-up right after a miss (last rating Hard or Again) → Again at once
+  - a new word's first-sighting test typed clean → its card starts with Easy; the last warm-up typing hides the
+    furigana and starts the card with Good (clean) or Hard (Tab)
+  - typos never count. The practice page flashes each word's grade as it is typed.
 - **Review mode.** New words only come in while "learn new" is on. With it off, only due words are
   targeted and the warm-up words are left alone, and when nothing is due you are done. The app nudges you
   to clear your due words before learning more.

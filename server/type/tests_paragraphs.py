@@ -171,7 +171,7 @@ class ParagraphTests(TestCase):
         self.assertEqual(passage["url"], first.url)
         self.assertEqual([line["text"] for line in lines], ["先生は本を読んだ。", "学生は山へ行った。", "先生と学生は話した。"])
         self.assertEqual((payload["sentence_id"], payload["text"]), (lines[0]["sentence_id"], lines[0]["text"]))
-        self.assertEqual(lines[0]["tokens"], payload["tokens"])
+        self.assertEqual(lines[0]["tokens"], [{k: v for k, v in t.items() if k != "grade"} for t in payload["tokens"]])  # grades: line being typed only
         self.assertEqual((role_words(payload["tokens"], "review"), role_words(payload["tokens"], "learning")), (["先生"], []))
         self.assertEqual(set(payload["words"]), {str(t["word"]) for t in payload["tokens"] if t["word"]})
         # Lines still to come show the passage's targets: the review word stays hidden, the new word highlighted.

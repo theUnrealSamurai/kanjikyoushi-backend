@@ -11,6 +11,7 @@ class SubmitSerializer(serializers.Serializer):
     typed = serializers.CharField(trim_whitespace=False)
     revealed = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
     skipped = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
+    help = serializers.BooleanField(required=False, default=False)  # help mode was on: no clean reads count
 
 
 def get_learner(request):
@@ -25,13 +26,13 @@ def get_learner(request):
     return learner
 
 
-def next_sentence_response(learner):
+def next_sentence_response(learner, **extra):
     if not learner.onboarded:
         return Response({"error": "not_onboarded"}, status=409)
     payload = learner.next_sentence()
     if payload is None:
-        return Response({"done": True, "corpus_empty": not Sentence.objects.exists(), "stats": learner.stats()})
-    return Response(payload)
+        return Response({"done": True, "corpus_empty": not Sentence.objects.exists(), "stats": learner.stats(), **extra})
+    return Response({**payload, **extra})
 
 
 @api_view(['POST'])
@@ -92,17 +93,18 @@ def due(request):
 @permission_classes([IsAuthenticated])
 @transaction.atomic
 def submit(request):
-    """Grade the typed sentence and return the next one, so the page needs only one request per sentence."""
+    """Grade the typed sentence and return the next one, so the page needs only one request per sentence. "graded" has
+    what the typed sentence did to each word (see Learner.submit), which the page checks against what it flashed."""
     serializer = SubmitSerializer(data=request.data)
     if not serializer.is_valid():
         return Response(serializer.errors, status=400)
 
     data, learner = serializer.validated_data, get_learner(request)
     try:
-        learner.submit(data["sentence_id"], data["typed"], data["revealed"], data["skipped"])
+        outcomes = learner.submit(data["sentence_id"], data["typed"], data["revealed"], data["skipped"], data["help"])
     except ValueError as error:
         return Response({"error": str(error)}, status=400)
-    return next_sentence_response(learner)
+    return next_sentence_response(learner, graded={str(word_id): outcome for word_id, outcome in outcomes.items()})
 
 
 @api_view(['POST'])
