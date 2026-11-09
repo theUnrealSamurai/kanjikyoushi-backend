@@ -828,11 +828,11 @@ class LearningFlowTests(TestCase):
         with patch.object(timezone, "now", return_value=self.at(2026, 3, 10, 3)):
             report = self.client.post("/type/stats", {"days": 7}, format="json").json()
         self.assertEqual(set(report), {"today", "totals", "days", "forecast", "jlpt", "tracking_since"})
-        self.assertEqual(set(report["today"]), {"words", "kanji", "reviews", "sentences"})
+        self.assertEqual(set(report["today"]), {"words", "kanji", "reviews", "sentences", "typing_seconds"})
         self.assertEqual(set(report["totals"]), {"words", "kanji", "known_kanji", "learning", "due", "sentences",
-                                                 "reviews", "retention", "streak"})
+                                                 "typing_seconds", "reviews", "retention", "streak"})
         self.assertEqual(set(report["days"][0]), {"date", "words", "kanji", "reviews", "hard", "sentences",
-                                                  "total_words", "total_kanji"})
+                                                  "typing_seconds", "total_words", "total_kanji"})
         self.assertEqual(set(report["forecast"][0]), {"date", "due"})
         self.assertEqual(set(report["jlpt"][0]), {"level", "total", "learned", "known"})
 
@@ -850,14 +850,15 @@ class LearningFlowTests(TestCase):
         self.assertEqual([d["reviews"] for d in days], [0, 0, 0, 0, 0, 0, 3])
         self.assertEqual([d["hard"] for d in days], [0, 0, 0, 0, 0, 0, 1])
         self.assertEqual([d["sentences"] for d in days], [0, 0, 1, 0, 1, 1, 2])
-        self.assertEqual(report["today"], {"words": 1, "kanji": 2, "reviews": 3, "sentences": 2})
+        self.assertEqual([d["typing_seconds"] for d in days], [0] * 7)  # every gap in the fixture is over 3 minutes
+        self.assertEqual(report["today"], {"words": 1, "kanji": 2, "reviews": 3, "sentences": 2, "typing_seconds": 0})
 
         levels = jlpt_kanji()
         learned = set("先生会議食")  # 雨 is known, so it isn't learned in the app
         totals = report["totals"]
         self.assertEqual(totals, {
             "words": 4, "kanji": 5, "known_kanji": len(learner.known_kanji), "learning": 1, "due": 1,
-            "sentences": 5, "reviews": 4, "retention": 2 / 3,  # the February review is outside the window
+            "sentences": 5, "typing_seconds": 0, "reviews": 4, "retention": 2 / 3,  # the February review is outside the window
             "streak": 3,  # the 8th, 9th and 10th; nothing on the 7th
         })
         self.assertEqual(report["tracking_since"], "2026-02-01")
@@ -871,6 +872,21 @@ class LearningFlowTests(TestCase):
             self.assertEqual(entry["total"], len(in_level))
             self.assertEqual(entry["learned"], len(in_level & learned))
             self.assertEqual(entry["known"], len(in_level & set(learner.known_kanji)))
+
+    def test_typing_time_counts_gaps_up_to_three_minutes(self):
+        learner = self.build_history()
+        SentenceLog.objects.filter(learner=learner).delete()
+        for at in [self.at(2026, 3, 10, 2, 0, 0), self.at(2026, 3, 10, 2, 0, 40),  # +40s
+                   self.at(2026, 3, 10, 2, 3, 40),                                 # +3 min exactly: still counts
+                   self.at(2026, 3, 10, 2, 6, 41),                                 # +3 min 1 s: a break
+                   self.at(2026, 3, 10, 2, 7, 1),                                  # +20s
+                   self.at(2026, 3, 9, 2, 0, 0), self.at(2026, 3, 9, 2, 1, 0)]:    # +60s on the 9th
+            SentenceLog.objects.create(learner=learner, at=at)
+        with patch.object(timezone, "now", return_value=self.at(2026, 3, 10, 3)):
+            report = learner.report(7)
+        self.assertEqual([d["typing_seconds"] for d in report["days"]][-2:], [60, 40 + 180 + 20])
+        self.assertEqual(report["today"]["typing_seconds"], 240)
+        self.assertEqual(report["totals"]["typing_seconds"], 300)
 
     def test_streak_ends_yesterday_until_something_is_typed_today(self):
         learner = self.build_history()

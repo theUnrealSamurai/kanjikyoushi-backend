@@ -32,6 +32,7 @@ CANDIDATES_PER_WORD = 200   # sentences sampled per target word when picking the
 RECENT_SENTENCES = 50       # don't repeat a sentence typed this recently
 DUE_LIST_LIMIT = 300        # most words the due list shows (the kanji list and the totals cover all due words)
 REPORT_DAYS = (7, 365)      # fewest and most days the stats report covers
+TYPING_IDLE = timedelta(minutes=3)  # a longer gap between two finished sentences is a break, not time spent typing
 FORECAST_DAYS = 7           # days the due forecast looks ahead, today included
 NOT_KANJI = "々〆ヶ"         # repeat marks: not kanji to learn (as in jlpt_level)
 PASSAGE_DUE_TARGETS = 30    # how many of the most overdue words to look for passages for: a passage has room for many
@@ -583,6 +584,12 @@ class Learner(models.Model):
         review_rows = list(self.reviews.values_list("rating", "at"))
         sentence_times = list(self.sentence_logs.values_list("at", flat=True))
         review_days, hard_days, sentence_days = Counter(), Counter(), Counter(local(at) for at in sentence_times)
+        # Time typing, roughly: each sentence is credited the time since the one before it, unless that gap is a break
+        # (TYPING_IDLE). A session's first sentence has no earlier one, so it counts nothing. Credited to the later day.
+        typing_days, ordered = Counter(), sorted(sentence_times)
+        for before, after in zip(ordered, ordered[1:]):
+            if after - before <= TYPING_IDLE:
+                typing_days[local(after)] += (after - before).total_seconds()
         for rating, at in review_rows:
             review_days[local(at)] += 1
             hard_days[local(at)] += rating < Rating.Good
@@ -602,6 +609,7 @@ class Learner(models.Model):
                 "reviews": review_days[date],
                 "hard": hard_days[date],
                 "sentences": sentence_days[date],
+                "typing_seconds": round(typing_days[date]),
                 "total_words": total_words,
                 "total_kanji": total_kanji,
             })
@@ -638,7 +646,7 @@ class Learner(models.Model):
         ) if moment]
         last = rows[-1]
         return {
-            "today": {key: last[key] for key in ("words", "kanji", "reviews", "sentences")},
+            "today": {key: last[key] for key in ("words", "kanji", "reviews", "sentences", "typing_seconds")},
             "totals": {
                 "words": len(learned_rows),
                 "kanji": len(learned_kanji),
@@ -646,6 +654,7 @@ class Learner(models.Model):
                 "learning": self.words.filter(status=UserWord.LEARNING).count(),
                 "due": self.due_words().count(),
                 "sentences": len(sentence_times),
+                "typing_seconds": round(sum(typing_days.values())),
                 "reviews": len(review_rows),
                 "retention": sum(rating >= Rating.Good for rating in in_window) / len(in_window) if in_window else None,
                 "streak": streak,
