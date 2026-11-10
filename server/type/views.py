@@ -94,17 +94,20 @@ def due(request):
 @transaction.atomic
 def submit(request):
     """Grade the typed sentence and return the next one, so the page needs only one request per sentence. "graded" has
-    what the typed sentence did to each word (see Learner.submit), which the page checks against what it flashed."""
+    what the typed sentence did to each word (see Learner.submit), which the page checks against what it flashed.
+    "celebrate" lists the kanji milestones it reached (see Learner.celebrations), empty when none."""
     serializer = SubmitSerializer(data=request.data)
     if not serializer.is_valid():
         return Response(serializer.errors, status=400)
 
     data, learner = serializer.validated_data, get_learner(request)
+    warming = learner.warming_words()
     try:
         outcomes = learner.submit(data["sentence_id"], data["typed"], data["revealed"], data["skipped"], data["help"])
     except ValueError as error:
         return Response({"error": str(error)}, status=400)
-    return next_sentence_response(learner, graded={str(word_id): outcome for word_id, outcome in outcomes.items()})
+    return next_sentence_response(learner, graded={str(word_id): outcome for word_id, outcome in outcomes.items()},
+                                  celebrate=learner.celebrations(warming))
 
 
 @api_view(['POST'])

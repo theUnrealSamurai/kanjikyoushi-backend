@@ -11,6 +11,11 @@ The frontend lives in [kanjikyoushi-frontend](https://github.com/theUnrealSamura
   sentences a second. Nothing heavy happens per request.
 - **Meanings.** `load_dictionary` fills each word's English meanings (up to 3 senses) from
   [JMdict](https://github.com/scriptin/jmdict-simplified), matching on text and reading.
+- **Kanji cards.** `build_kanjidic` writes `assets/kanjidic2.json`: each kanji's on/kun readings and English meanings in
+  KANJIDIC's own order (main sense and common reading first; `assets/kanji_data.json` is alphabetical).
+  Dictionary data: JMdict and KANJIDIC2 are the property of the
+  [Electronic Dictionary Research and Development Group](https://www.edrdg.org/), used under
+  [CC BY-SA 4.0](https://www.edrdg.org/edrdg/licence.html), via jmdict-simplified.
 - **The unit is the word**, keyed by text and reading (方/ほう and 方/かた are different words). Names
   and numbers get furigana but are never graded.
 - **Only the JLPT vocabulary list is taught** (see "Vocabulary list" below). Every other word is treated like a
@@ -18,6 +23,11 @@ The frontend lives in [kanjikyoushi-frontend](https://github.com/theUnrealSamura
 - **Learning.** Kanji are learned in JLPT order, N5 to N1. A word's stage is the harder of its list level and
   its hardest kanji's level (椅子, an N5 word with an N1 kanji, waits for N1). New words go stage by stage, then
   by their hardest kanji's place in the kanji list, list level and frequency, ten at a time (`learning_order`).
+  A kanji's one-kanji word comes before its longer words (週 before 今週, even though 週 is an N3 word), and a
+  longer word waits until you know each of its kanji (known at onboarding, or in a word past its warm-up), unless
+  it's the word that brings the kanji in (曜日 for 曜, which has no one-kanji word). Waiting words are passed over.
+  Finishing a JLPT level's kanji, or reaching 100, 250, 500, 1000, 1500, 2000 (then every 500) kanji learned, plays
+  a short celebration (`celebrations`).
   The first time, a new word is a test with its furigana
   hidden: typed without help, you already know it, so it gets its
   [FSRS](https://github.com/open-spaced-repetition/py-fsrs) card straight away. Otherwise it's typed 3 times
@@ -64,6 +74,7 @@ cd server
 uv run python manage.py migrate
 uv run python manage.py build_corpus assets/sample_sentences.txt   # 2.4k-sentence sample
 uv run python manage.py load_dictionary                            # English meanings (downloads JMdict once)
+uv run python manage.py build_kanjidic                            # only to rebuild assets/kanjidic2.json
 uv run python manage.py runserver
 ```
 
@@ -134,6 +145,12 @@ ids); if not, it rolls back and says what differs. The live database is opened r
 `load_dictionary` downloads the latest full English `jmdict-eng-*.json.zip` from jmdict-simplified into
 `data/` (gitignored) the first time; `--file PATH` uses a local `.json` or `.json.zip` instead. It
 prints how many words got meanings.
+
+`build_kanjidic` builds `assets/kanjidic2.json` (committed, so you only rerun it to update) from the English KANJIDIC2
+release of the same jmdict-simplified project: `uv run python manage.py build_kanjidic`. It downloads the latest
+`kanjidic2-en-*.json.zip` into `data/` the first time (`--file PATH` uses a local `.json` or `.json.zip`) and keeps the
+kanji that are in `kanji_data.json`, as `{kanji: {"on": [...], "kun": [...], "meanings": [...]}}`. Only the kanji cards
+(`kanji_info`) read it; furigana, levels and jōyō checks still use `kanji_data.json`.
 
 ## Passages (paragraph mode)
 

@@ -323,15 +323,27 @@ def rank_level(rank):
     return 5 - sum(rank >= start for start in level_starts()[1:])
 
 
+@lru_cache(maxsize=1)
+def kanjidic():
+    """KANJIDIC2 readings and meanings in its own order (main sense and common reading first), trimmed by
+    `build_kanjidic`: {kanji: {"on": [...], "kun": [...], "meanings": [...]}}. Empty if the asset isn't built."""
+    try:
+        with open(settings.ASSETS_DIR / "kanjidic2.json", encoding="utf-8") as file:
+            return json.load(file)
+    except FileNotFoundError:
+        return {}
+
+
 def kanji_info(text):
-    """On/kun readings and meanings for each kanji in the text, for the kanji cards."""
-    data = kanji_dictionary()
+    """On/kun readings and meanings for each kanji in the text, for the kanji cards. KANJIDIC order (main sense
+    first); kanji_data.json (alphabetical) only for a kanji KANJIDIC lacks."""
+    data, ordered = kanji_dictionary(), kanjidic()
     return [
         {
             "kanji": kanji,
-            "on_readings": data[kanji]["on_readings"],
-            "kun_readings": data[kanji]["kun_readings"],
-            "meanings": data[kanji]["meanings"],
+            "on_readings": ordered[kanji]["on"] if kanji in ordered else data[kanji]["on_readings"],
+            "kun_readings": ordered[kanji]["kun"] if kanji in ordered else data[kanji]["kun_readings"],
+            "meanings": ordered[kanji]["meanings"] if kanji in ordered else data[kanji]["meanings"],
         }
         for kanji in dict.fromkeys(KANJI_RE.findall(text))
         if kanji in data

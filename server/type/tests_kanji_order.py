@@ -35,10 +35,11 @@ class KanjiOrderTests(TestCase):
             word(text, level)
         for text in ("日本", "子", "行く", "休む"):  # N5 words for those N5 kanji, so none is a leftover
             word(text, 5)
-        # 学生 is N5 all round. 本, 銀行 and 映画 are stage N4 (an N4 word, then N4 kanji, by their place in the
-        # kanji list: 銀 before 映). 休学 (an N1 word) and 椅子 (an N1 kanji) both wait for N1, 休 coming first.
+        # 学生 is N5 all round. 本 is an N4 word, but it's 本's one-kanji word, so it moves up in front of 日本 (see
+        # one_kanji_first). 銀行 and 映画 are stage N4 (N4 kanji, by their place in the kanji list: 銀 before 映).
+        # 休学 (an N1 word) and 椅子 (an N1 kanji) both wait for N1, 休 coming first.
         order = [text for text in self.order() if text in ("椅子", "休学", "映画", "本", "銀行", "学生")]
-        self.assertEqual(order, ["学生", "本", "銀行", "映画", "休学", "椅子"])
+        self.assertEqual(order, ["本", "学生", "銀行", "映画", "休学", "椅子"])
 
     def test_a_kanji_no_word_of_its_own_stage_has_comes_at_the_end_of_that_stage(self):
         word("銀行", 5)
@@ -47,6 +48,53 @@ class KanjiOrderTests(TestCase):
         word("不便", 3)  # 便 is N3: never brought forward
         word("安い", 5)
         self.assertEqual(self.order(), ["安い", "銀行", "不安", "部屋", "不便"])
+
+    def test_a_kanjis_one_kanji_word_comes_before_its_longer_words(self):
+        word("今", 5)
+        word("今週", 5)
+        word("週", 3)    # an N3 word: would come at N3, long after 今週
+        word("日", 5)
+        word("毎日", 5)
+        word("毎", 2)    # an N2 word
+        word("研究", 4)  # no one-kanji word for 研 or 究: it brings both in
+        self.assertEqual(self.order(), ["日", "今", "週", "今週", "毎", "毎日", "研究"])
+        stages = {text: stage for _, text, stage in learning_order(teachable_words())}
+        self.assertEqual((stages["週"], stages["毎"]), (5, 5))  # moved words take the stage they're moved into
+
+    def test_a_word_waits_until_you_know_its_kanji(self):
+        day, every = word("日", 5), word("毎", 2)
+        word("毎日", 5)
+        word("曜日", 5)
+        learner = self.learner("")
+        unmet = lambda: [text for _, text in learner._unmet_words(teachable_words())]
+        # 毎日 needs 日 and 毎, which have their own words; 曜日 needs 日, but it's the word that brings 曜 in.
+        self.assertEqual(unmet(), ["日", "毎"])
+        warming = UserWord.objects.create(learner=learner, word=day, status=UserWord.LEARNING)
+        self.assertEqual(unmet(), ["毎"])  # 日 is warming up: not known yet
+        warming.status = UserWord.REVIEW
+        warming.save()
+        self.assertEqual(unmet(), ["毎", "曜日"])
+        UserWord.objects.create(learner=learner, word=every, status=UserWord.LEARNING)
+        self.assertEqual(unmet(), ["曜日"])
+        learner.words.filter(word=every).update(status=UserWord.REVIEW)
+        self.assertEqual(unmet(), ["毎日", "曜日"])
+
+    def test_kanji_known_at_onboarding_count_as_known(self):
+        word("日", 5)
+        word("毎", 2)
+        word("毎日", 5)
+        learner = self.learner("日毎")
+        self.assertIn("毎日", [text for _, text in learner._unmet_words(teachable_words())])
+
+    def test_waiting_words_are_passed_over_and_later_ones_fill_the_pool(self):
+        day = word("日", 5)
+        for text, level in [("毎", 2), ("毎日", 5), ("学生", 5), ("曜日", 5)]:
+            word(text, level)
+        learner = self.learner("")
+        UserWord.objects.create(learner=learner, word=day, status=UserWord.LEARNING)
+        learner._fill_learning_pool(teachable_words())
+        # 毎日 and 曜日 wait for 日 to finish its warm-up; 毎 and 学生 come in, though the pool has room for more.
+        self.assertEqual(set(learner.words.values_list("word__text", flat=True)), {"日", "毎", "学生"})
 
     def test_the_bookmark_stops_at_the_first_kanji_you_could_learn_but_cant_read(self):
         word("一人", 5)

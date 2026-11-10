@@ -104,7 +104,8 @@ def learning_order(rows):
     then by list level and frequency. A kanji that no word of its own level's stage has (不 is only in harder
     words) comes in at that stage with its easiest word that has no harder kanji (不安: an N3 word, but its kanji are
     N4 and N5), so each level can be finished before the next starts; if every word with it has a harder kanji, it
-    waits for that one's stage."""
+    waits for that one's stage. Then each kanji's one-kanji word moves up in front of its longer words (see
+    one_kanji_first)."""
     levels = jlpt_kanji()
     stage = {id: min(list_level, rank_level(rank)) for id, _, rank, list_level, _ in rows}
     easiest, staged = {}, set()  # kanji -> (key, id) of its easiest word with no harder kanji; kanji their stage has
@@ -119,7 +120,48 @@ def learning_order(rows):
         if kanji not in staged:
             stage[id] = max(stage[id], levels[kanji])
     rows = sorted(rows, key=lambda row: (-stage[row[0]], row[2], -row[3], -row[4], row[0]))
-    return [(id, text, stage[id]) for id, text, *_ in rows]
+    return one_kanji_first([(id, text, stage[id]) for id, text, *_ in rows])
+
+
+def word_kanji(text):
+    """The kanji of a word, in order, once each. The repeat marks 々〆ヶ aren't kanji to learn."""
+    return [kanji for kanji in dict.fromkeys(KANJI_RE.findall(text)) if kanji not in NOT_KANJI]
+
+
+def one_kanji_first(order):
+    """The learning order with each kanji's first one-kanji word moved up to just before the first longer word with
+    that kanji (owner, 2026-11-10: "if a 2 word kanji appears, I should know both the kanjis. if I don't, introduce
+    me the words with only one kanji"): 週 before 今週, 毎 before 毎日. A moved word takes the stage of the word it
+    goes in front of, even when the list puts it on a harder level (週 is an N3 word, 毎 N2): it brings no harder
+    kanji in. A kanji with no one-kanji word (曜, 族) still comes in with its first longer word."""
+    single = {}  # kanji -> its first one-kanji word, (id, text)
+    for id, text, _ in order:
+        kanji = word_kanji(text)
+        if len(kanji) == 1:
+            single.setdefault(kanji[0], (id, text))
+    placed, moved = set(), []
+    for id, text, stage in order:
+        if id in placed:
+            continue
+        kanji = word_kanji(text)
+        if len(kanji) > 1:
+            for one in (single[k] for k in kanji if k in single and single[k][0] not in placed):
+                moved.append((*one, stage))
+                placed.add(one[0])
+        moved.append((id, text, stage))
+        placed.add(id)
+    return moved
+
+
+def introducers(order):
+    """{kanji: id of the first word in the learning order that has it}: the word that brings that kanji in. After
+    one_kanji_first that's its one-kanji word when there is one; otherwise its first longer word (曜日 brings 曜 in,
+    and 研究 both of its kanji)."""
+    first = {}
+    for id, text, _ in order:
+        for kanji in word_kanji(text):
+            first.setdefault(kanji, id)
+    return first
 
 
 def sentence_range(word_rank, bound):
@@ -404,6 +446,20 @@ class PassageSentence(models.Model):
     class Meta:
         ordering = ["position"]
         constraints = [models.UniqueConstraint(fields=["passage", "position"], name="unique_passage_sentence")]
+
+
+KANJI_MILESTONES = (100, 250, 500, 1000, 1500, 2000)  # kanji learned here that get a celebration, then every 500 after
+MILESTONE_STEP = 500
+
+
+def kanji_milestone(before, after):
+    """The highest kanji-count milestone passed going from `before` to `after` kanji learned, or None."""
+    passed = [m for m in KANJI_MILESTONES if before < m <= after]
+    if after > KANJI_MILESTONES[-1]:
+        top = after // MILESTONE_STEP * MILESTONE_STEP
+        if top > max(before, KANJI_MILESTONES[-1]):
+            passed.append(top)
+    return max(passed, default=None)
 
 
 class Learner(models.Model):
@@ -1173,6 +1229,50 @@ class Learner(models.Model):
         return outcomes
 
 
+    def warming_words(self):
+        """{word id: text} of the warm-up words the sentence on screen grades: the only words typing it can graduate.
+        Taken before submit, for celebrations."""
+        return dict(self.words.filter(word_id__in=self.current.get("learning", []), status=UserWord.LEARNING)
+                    .values_list("word_id", "word__text"))
+
+
+    def celebrations(self, warming):
+        """What the sentence just submitted earned, for the page to celebrate: [{"kind": "level", "level": 5}, ...,
+        {"kind": "kanji", "count": 100}], levels first and at most one kanji milestone (the highest). `warming` is
+        warming_words() from before the submit. Only a word graduating to REVIEW can change anything, so when none
+        did this costs one small query. Then one query for the learned words' text.
+        - kanji: the stats page's number (report totals.kanji): distinct kanji in REVIEW words, minus those known at
+          onboarding, minus 々〆ヶ. A milestone is a count crossing it.
+        - level N5-N1: every kanji of that JLPT level that some teachable word has is covered (known at onboarding
+          or in a REVIEW word; a KNOWN word's kanji are all known at onboarding), and one of the new kanji is in it."""
+        if not warming:
+            return []
+        graduated = set(self.words.filter(word_id__in=warming, status=UserWord.REVIEW).values_list("word_id", flat=True))
+        if not graduated:
+            return []
+        known, repeat_marks = set(self.known_kanji), set(NOT_KANJI)
+        before, after = set(), set()
+        for word_id, text in self.words.filter(status=UserWord.REVIEW).values_list("word_id", "word__text"):
+            kanji = set(KANJI_RE.findall(text)) - known - repeat_marks
+            after |= kanji
+            if word_id not in graduated:
+                before |= kanji
+        new = after - before
+        if not new:
+            return []
+        covered, levels = after | known, jlpt_kanji()
+        can_learn = {kanji for _, text, *_ in teachable_words() for kanji in KANJI_RE.findall(text)}
+        celebrate = []
+        for level in range(5, 0, -1):
+            required = {kanji for kanji, kanji_level in levels.items() if kanji_level == level and kanji in can_learn}
+            if new & required and required <= covered:
+                celebrate.append({"kind": "level", "level": level})
+        milestone = kanji_milestone(len(before), len(after))
+        if milestone:
+            celebrate.append({"kind": "kanji", "count": milestone})
+        return celebrate
+
+
     def _next_line(self):
         """After a passage line is typed: the `current` for the next line, or {} after the last one, when the
         passage joins recent_passages so it isn't picked again soon."""
@@ -1205,10 +1305,28 @@ class Learner(models.Model):
 
 
     def _unmet_words(self, teachable):
-        """(id, text) of the words the learner hasn't met yet, in the learning order (see learning_order). Only words
-        on the list, and only those in a standalone sentence (frequency > 0), so sentence mode can serve them."""
-        met = set(self.words.values_list("word_id", flat=True))
-        return [(id, text) for id, text, _ in learning_order(teachable) if id not in met]
+        """(id, text) of the words the learner hasn't met yet and can start now, in the learning order (see
+        learning_order). Only words on the list, and only those in a standalone sentence (frequency > 0), so sentence
+        mode can serve them.
+
+        A word waits while it has a kanji you don't know yet (see kanji_known), unless it's the word that brings that
+        kanji in (see introducers; owner, 2026-11-10: "if a 2 word kanji appears, I should know both the kanjis"):
+        今週 waits until 週 has finished its warm-up, while 曜日, the first word with 曜, brings 曜 in itself. Waiting
+        words are passed over, so the words after them fill the pool meanwhile; there's no stopping at the end of a
+        stage, where a waiting word could otherwise hold everything up (a one-kanji word like 週 may have no sentence
+        you can read until the bookmark moves on)."""
+        order = learning_order(teachable)
+        met, known, first = set(self.words.values_list("word_id", flat=True)), self.kanji_known(), introducers(order)
+        return [(id, text) for id, text, _ in order
+                if id not in met and all(first[kanji] == id for kanji in word_kanji(text) if kanji not in known)]
+
+
+    def kanji_known(self):
+        """The kanji you know: picked at onboarding, or in a word you have learned (REVIEW; a word still warming up
+        doesn't count), as for n5_progress. KNOWN words are left out: a word is only ever marked known when it's made
+        of kanji known at onboarding, and leaving them out keeps this quick for learners who knew many at onboarding."""
+        texts = self.words.filter(status=UserWord.REVIEW).values_list("word__text", flat=True)
+        return set(self.known_kanji) | {kanji for text in texts for kanji in KANJI_RE.findall(text)}
 
 
     def release_warmups(self, teachable, apply=False):
